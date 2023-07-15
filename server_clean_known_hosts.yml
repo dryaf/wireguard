@@ -1,0 +1,9 @@
+- hosts: servers
+  gather_facts: no
+  tasks:
+    - name: Remove servers from known_hosts
+      local_action:
+        module: command
+        args:
+          cmd: ssh-keygen -R {{ inventory_hostname }}
+      ignore_errors: yes

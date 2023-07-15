@@ -1,0 +1,34 @@
+---
+- hosts: servers
+  become: yes
+  gather_facts: yes
+  vars:
+    client_name: "{{ client_name }}"
+  tasks:
+    - name: Check if client configuration exists
+      stat:
+        path: "/etc/wireguard/{{ client_name }}.conf"
+      register: client_conf
+
+    - name: Fail if client configuration does not exist
+      fail:
+        msg: "Client configuration for {{ client_name }} does not exist!"
+      when: not client_conf.stat.exists
+
+    - name: Remove client from WireGuard configuration
+      blockinfile:
+        path: /etc/wireguard/wg0.conf
+        state: absent
+        marker: "# {mark} ANSIBLE MANAGED BLOCK FOR {{ client_name }}"
+      register: removed_from_config
+
+    - name: Delete client configuration
+      file:
+        path: "/etc/wireguard/{{ client_name }}.conf"
+        state: absent
+
+    - name: Restart WireGuard service
+      systemd:
+        name: wg-quick@wg0
+        state: restarted
+      when: removed_from_config is changed
