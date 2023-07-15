@@ -14,17 +14,17 @@ Ensure that you have the following software installed on your system:
 If these are not installed, you can set them up with the following commands:
 
 ```shell
-    # Install Homebrew (macOS)
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    
-    # Install Ansible
-    brew install ansible 
-    
-    # Install devsec.hardening Ansible collection
-    ansible-galaxy collection install devsec.hardening --force
-    
-    # Install netaddr Python package
-    pip install netaddr
+# Install Homebrew (macOS)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Install Ansible
+brew install ansible 
+
+# Install devsec.hardening Ansible collection
+ansible-galaxy collection install devsec.hardening --force
+
+# Install netaddr Python package
+pip install netaddr
 ```
 
 ## Setup
@@ -33,7 +33,7 @@ If these are not installed, you can set them up with the following commands:
 Initialize the server IP, username, and SSH port.
 
 ```shell
-    make init
+make init
 ```
 The `make init` command will prompt you for the server host, server username, and SSH port (default: 22).
 
@@ -41,7 +41,7 @@ The `make init` command will prompt you for the server host, server username, an
 To set up the WireGuard server, run the following command:
 
 ```shell
-    make vpn-server-setup
+make vpn-server-setup
 ```
 This command will ask you to enter the DNS server (default: 10.99.0.1).
 
@@ -49,8 +49,8 @@ This command will ask you to enter the DNS server (default: 10.99.0.1).
 You can optionally harden your server with the `devsec.hardening` Ansible collection and the `server_hardening.yml` playbook.
 
 ```shell
-    ansible-galaxy collection install devsec.hardening --force
-    ansible-playbook -i inventory.ini server_hardening.yml
+ansible-galaxy collection install devsec.hardening --force
+ansible-playbook -i inventory.ini server_hardening.yml
 ```
 
 ## Managing VPN Clients
@@ -59,24 +59,24 @@ To add, remove, list, or generate QR codes for VPN clients, use the following co
 
 ### Add a Client
 ```shell
-  make vpn-client-add
+make vpn-client-add
 ```
 The command will prompt you to enter the client name.
 
 ### Remove a Client
 ```shell
-    make vpn-client-remove
+make vpn-client-remove
 ```
 You will need to enter the client name that you want to remove.
 
 ### List All Clients
 ```shell
-    make vpn-client-list
+make vpn-client-list
 ```
 
 ### Display Client's QR Code
 ```shell
-    make vpn-client-qrcode
+make vpn-client-qrcode
 ```
 You will be asked to enter the client name whose QR code you want to display.
 
