@@ -1,4 +1,4 @@
-.PHONY: clean_known_hosts vpn-server-setup vpn-server-status vpn-client-add vpn-client-qrcode vpn-client-remove vpn-client-list help init vpn-debug vpn-monitor
+.PHONY: clean_known_hosts vpn-server-setup vpn-server-status vpn-client-add vpn-client-qrcode vpn-client-remove vpn-client-list help init vpn-debug vpn-monitor check-auto-upgrades enable-auto-upgrades disable-auto-upgrades
 
 .DEFAULT_GOAL := help
 
@@ -42,6 +42,18 @@ vpn-monitor: check_ansible ## Live monitor WireGuard & DNS logs (Ctrl+C to stop)
 	KEY=$$(echo $$SERVER_LINE | tr ' ' '\n' | grep 'ansible_ssh_private_key_file=' | cut -d= -f2); \
 	echo "Connecting to $$USER@$$HOST:$$PORT with key $$KEY..."; \
 	ssh -t -p $$PORT -i $$KEY $$USER@$$HOST "journalctl -u dns-filter -u wg-quick@wg0 -f -n 20"
+
+check-auto-upgrades: check_ansible ## Check status of unattended upgrades
+	@echo "Checking APT configuration..."
+	@ansible -i inventory.ini servers -b -m shell -a "apt-config dump | grep 'APT::Periodic'"
+	@echo "\nChecking service status..."
+	@ansible -i inventory.ini servers -b -m shell -a "systemctl status unattended-upgrades --no-pager" | grep "Active:"
+
+enable-auto-upgrades: check_ansible ## Enable daily auto-updates
+	@ansible-playbook -i inventory.ini server_toggle_autoupgrades.yml -e "enabled=yes"
+
+disable-auto-upgrades: check_ansible ## Disable auto-updates
+	@ansible-playbook -i inventory.ini server_toggle_autoupgrades.yml -e "enabled=no"
 
 init: check_ansible ## Initialize the inventory file
 	@read -p "Enter server host: " server_host; \

@@ -1,0 +1,30 @@
+---
+- hosts: servers
+  become: yes
+  vars:
+    enabled: "yes" # Default to enabled
+  tasks:
+    - name: Configure periodic updates
+      copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        content: |
+          APT::Periodic::Update-Package-Lists "{{ '1' if enabled == 'yes' else '0' }}";
+          APT::Periodic::Download-Upgradeable-Packages "{{ '1' if enabled == 'yes' else '0' }}";
+          APT::Periodic::Unattended-Upgrade "{{ '1' if enabled == 'yes' else '0' }}";
+          APT::Periodic::AutocleanInterval "7";
+
+    - name: Restart unattended-upgrades service
+      systemd:
+        name: unattended-upgrades
+        state: restarted
+      when: enabled == "yes"
+
+    - name: Stop unattended-upgrades service
+      systemd:
+        name: unattended-upgrades
+        state: stopped
+      when: enabled == "no"
+
+    - name: Display status
+      debug:
+        msg: "Auto-upgrades are now {{ 'ENABLED' if enabled == 'yes' else 'DISABLED' }}"
