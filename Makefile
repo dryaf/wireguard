@@ -1,4 +1,4 @@
-.PHONY: clean_known_hosts vpn-server-setup vpn-server-status vpn-client-add vpn-client-qrcode vpn-client-remove vpn-client-list help init vpn-debug vpn-monitor check-auto-upgrades enable-auto-upgrades disable-auto-upgrades
+.PHONY: clean_known_hosts vpn-server-setup vpn-server-status vpn-client-add vpn-client-qrcode vpn-client-remove vpn-client-list help init vpn-debug vpn-monitor check-auto-upgrades enable-auto-upgrades disable-auto-upgrades vpn-firewall-setup
 
 .DEFAULT_GOAL := help
 
@@ -11,6 +11,9 @@ clean_known_hosts: check_ansible ## to play around with server_debug.yml
 vpn-server-setup: check_ansible ## Setup the WireGuard server
 	@read -p "Enter DNS server (default: 10.99.0.1): " dns_server; \
 	 ansible-playbook -i inventory.ini wireguard_server_setup.yml -e "dns_server=$${dns_server:-10.99.0.1}"
+
+vpn-firewall-setup: check_ansible ## Configure firewall (Block Ext 53/8080, Allow VPN/SSH)
+	@ansible-playbook -i inventory.ini server_firewall_setup.yml
 
 vpn-server-status: check_ansible ## Get the vpn server status
 	@ansible-playbook -i inventory.ini wireguard_server_status.yml

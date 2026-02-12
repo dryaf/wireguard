@@ -10,6 +10,7 @@ Ensure that you have the following software installed on your system:
 - Homebrew (for macOS)
 - Python's `netaddr` package
 - `devsec.hardening` Ansible collection
+- `community.general` Ansible collection
 
 If these are not installed, you can set them up with the following commands:
 
@@ -22,6 +23,7 @@ brew install ansible
 
 # Install devsec.hardening Ansible collection
 ansible-galaxy collection install devsec.hardening --force
+ansible-galaxy collection install community.general --force
 
 # Install netaddr Python package
 pip install netaddr
@@ -44,6 +46,13 @@ To set up the WireGuard server, run the following command:
 make vpn-server-setup
 ```
 This command will ask you to enter the DNS server (default: 10.99.0.1).
+
+### Firewall Setup
+Secure the server by blocking external access to sensitive ports (like DNS:53 and Web:8080) while allowing VPN clients and SSH.
+
+```shell
+make vpn-firewall-setup
+```
 
 ### Optional: Server Hardening
 You can optionally harden your server with the `devsec.hardening` Ansible collection and the `server_hardening.yml` playbook.

@@ -1,12 +1,68 @@
 ---
 - hosts: servers
   become: yes
+  
+  # --- PRE-TASKS: Prepare System ---
+  pre_tasks:
+    - name: Ensure Apt Cache is updated (Fix for cache lock/stale errors)
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      register: apt_result
+      until: apt_result is success
+      retries: 5
+      delay: 5
+      when: ansible_os_family == "Debian"
+
   collections:
     - devsec.hardening
   roles:
-    - devsec.hardening.os_hardening
+    - role: devsec.hardening.os_hardening
+    - role: devsec.hardening.ssh_hardening
+      vars:
+        # Enforce key-only login
+        ssh_password_authentication: "no"
+        ssh_permit_root_login: "prohibit-password"
+        # Allow specific SSH users.
+        ssh_allow_users: "root {{ ansible_user | default('') }}"
+        # Security tweaks
+        ssh_client_alive_interval: 300
+        ssh_client_alive_count_max: 5
+        # INCREASE AUTH TRIES: Prevents "Too many authentication failures" if user has many keys in agent
+        ssh_max_auth_tries: 20
+
   vars:
     sysctl_overwrite:
-    # also needed for docker
       net.ipv4.ip_forward: 1
       net.ipv6.conf.all.forwarding: 1
+
+  tasks:
+    - name: Install Fail2Ban for brute-force protection
+      package:
+        name: fail2ban
+        state: present
+
+    - name: Ensure Fail2Ban is started and enabled
+      systemd:
+        name: fail2ban
+        enabled: yes
+        state: started
+
+    - name: Configure Fail2Ban to protect SSH
+      copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [sshd]
+          enabled = true
+          port = {{ ansible_port | default(22) }}
+          filter = sshd
+          logpath = /var/log/auth.log
+          maxretry = 3
+          bantime = 1h
+      notify: Restart fail2ban
+
+  handlers:
+    - name: Restart fail2ban
+      systemd:
+        name: fail2ban
+        state: restarted

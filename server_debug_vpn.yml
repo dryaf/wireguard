@@ -15,7 +15,7 @@
       register: wg_status
       changed_when: false
 
-    - name: 3. Check UDP Port 51820 (Firewall)
+    - name: 3. Check UDP Port 51820 (Process Listener)
       shell: ss -ulpn | grep 51820
       register: port_check
       ignore_errors: yes
@@ -40,12 +40,20 @@
       register: dnat_rules
       changed_when: false
 
+    - name: 7. Check UFW Firewall Status
+      command: ufw status verbose
+      register: ufw_status
+      changed_when: false
+      failed_when: false
+
     # --- Report ---
     - name: "=== DEBUG REPORT ==="
       debug:
         msg:
           - "IP Forwarding: {{ ip_forward.stdout }}"
           - "WireGuard Port Open: {{ 'YES' if port_check.rc == 0 else 'NO (Critical)' }}"
+          - "--- UFW Firewall Status ---"
+          - "{{ ufw_status.stdout_lines | default(['UFW Not Installed/Active']) }}"
           - "--- DNS Listeners (Look for *:53 or 10.99.0.1:53) ---"
           - "{{ dns_details.stdout_lines }}"
           - "--- WireGuard Status ---"

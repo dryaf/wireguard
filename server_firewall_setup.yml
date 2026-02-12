@@ -1,0 +1,76 @@
+---
+- hosts: servers
+  become: yes
+  vars:
+    # Default WireGuard port, matches other playbooks
+    wireguard_port: 51820
+    # Use the inventory ssh port or default to 22
+    ssh_port: "{{ ansible_port | default(22) }}"
+
+  tasks:
+    - name: Install UFW
+      apt:
+        name: ufw
+        state: present
+        update_cache: yes
+
+    - name: Set UFW default forward policy to ACCEPT
+      # Essential for WireGuard to route traffic from VPN clients to the internet
+      lineinfile:
+        path: /etc/default/ufw
+        regexp: "^DEFAULT_FORWARD_POLICY="
+        line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'
+      notify: Reload UFW
+
+    - name: Allow SSH connections
+      community.general.ufw:
+        rule: allow
+        port: "{{ ssh_port }}"
+        proto: tcp
+        comment: "Allow SSH access"
+
+    - name: Allow WireGuard UDP traffic
+      community.general.ufw:
+        rule: allow
+        port: "{{ wireguard_port }}"
+        proto: udp
+        comment: "Allow WireGuard VPN tunnel"
+
+    - name: Allow all traffic from WireGuard interface (wg0)
+      # This allows VPN clients to access services like DNS (53) and HTTP (8080)
+      # that are otherwise blocked from the public internet.
+      community.general.ufw:
+        rule: allow
+        direction: in
+        interface: wg0
+        comment: "Allow VPN clients to access internal services"
+
+    - name: Allow loopback traffic
+      community.general.ufw:
+        rule: allow
+        direction: in
+        interface: lo
+        comment: "Allow localhost communication"
+
+    - name: Deny all other incoming traffic by default
+      community.general.ufw:
+        default: deny
+        direction: incoming
+
+    - name: Enable UFW
+      community.general.ufw:
+        state: enabled
+
+    - name: Check UFW status
+      command: ufw status verbose
+      register: ufw_status
+      changed_when: false
+
+    - name: Display UFW status
+      debug:
+        msg: "{{ ufw_status.stdout_lines }}"
+
+  handlers:
+    - name: Reload UFW
+      community.general.ufw:
+        state: reloaded

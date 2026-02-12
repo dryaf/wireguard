@@ -1,0 +1,4 @@
+---
+collections:
+  - name: devsec.hardening
+  - name: community.general
