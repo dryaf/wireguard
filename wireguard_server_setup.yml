@@ -1,29 +1,49 @@
 ---
 - hosts: servers
   become: yes
+  gather_facts: yes
   vars:
     wireguard_address: '10.99.0.1/24'
     wireguard_port: 51820
-    dns_server: '10.99.0.1' # might want to run a dns proxy that filters bad stuff
+    dns_server: '10.99.0.1' # dnsfilter should listen on this IP
 
   tasks:
     - name: Wait for dpkg/apt lock
-      become: yes
       shell: |
         while sudo lsof /var/lib/dpkg/lock >/dev/null; do
           sleep 1
         done
 
     - name: Update and Upgrade all packages
-      ansible.builtin.package:
+      package:
         name: '*'
         state: latest
         use: auto
 
     - name: Install necessary packages
-      ansible.builtin.package:
+      package:
         name: ['wireguard', 'qrencode', 'zip', 'iptables-persistent', 'unattended-upgrades', 'update-notifier-common']
         state: present
+
+    # --- Conflict Resolution for dnsfilter ---
+    - name: Stop systemd-resolved to free port 53
+      systemd:
+        name: systemd-resolved
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+
+    - name: Remove symlinked resolv.conf
+      file:
+        path: /etc/resolv.conf
+        state: absent
+
+    - name: Create static resolv.conf using public DNS (bootstrapping)
+      copy:
+        content: "nameserver 1.1.1.1\nnameserver 8.8.8.8"
+        dest: /etc/resolv.conf
+        mode: '0644'
+    # ----------------------------------------
 
     - name: Generate WireGuard server keys if not exist
       block:
@@ -43,8 +63,10 @@
           copy:
             content: "{{ server_private_key.stdout }}"
             dest: /etc/wireguard/privatekey
+            mode: '0600'
           when: not privatekey.stat.exists
           no_log: true
+          notify: Restart wg-quick
 
         - name: Derive WireGuard server public key
           shell: wg pubkey < /etc/wireguard/privatekey
@@ -59,7 +81,12 @@
       register: existing_private_key
       no_log: true
 
-    - name: Ensure ip forwarding is set up
+    - name: Set private key variable
+      set_fact:
+        server_priv_key_final: "{{ (server_private_key.stdout | default(existing_private_key.content | b64decode)) }}"
+      no_log: true
+
+    - name: Ensure ip forwarding is set up (System persistence)
       sysctl:
         name: "{{ item.key }}"
         value: "{{ item.value }}"
@@ -91,17 +118,8 @@
           APT::Periodic::AutocleanInterval "7";
 
     - name: Setup WireGuard configuration
-      copy:
-        content: |
-          [Interface]
-          Address = {{ wireguard_address }}
-          ListenPort = {{ wireguard_port }}
-          PrivateKey = {{ (server_private_key.stdout | default(existing_private_key.content | b64decode)) }}
-
-          PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE; iptables -t nat -A PREROUTING -i wg0 -p udp --dport 53 -j DNAT --to {{ dns_server }}:53; iptables -t nat -A PREROUTING -i wg0 -p tcp --dport 53 -j DNAT --to {{ dns_server }}:53
-          PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE; iptables -t nat -D PREROUTING -i wg0 -p udp --dport 53 -j DNAT --to {{ dns_server }}:53; iptables -t nat -D PREROUTING -i wg0 -p tcp --dport 53 -j DNAT --to {{ dns_server }}:53
-
-          # Rest of your configuration
+      template:
+        src: templates/wg0.conf.j2
         dest: /etc/wireguard/wg0.conf
         owner: root
         group: root
@@ -112,17 +130,19 @@
 
     - name: Save iptables rules
       command: sh -c "iptables-save > /etc/iptables/rules.v4"
+      changed_when: false
 
     - name: Enable and start WireGuard service
       systemd:
         name: wg-quick@wg0
         enabled: yes
-        state: restarted
+        state: started
 
     - name: Check WireGuard server status
       command: wg show wg0
       register: wireguard_status
       ignore_errors: true
+      changed_when: false
 
     - name: Display WireGuard server status
       debug:
@@ -143,4 +163,3 @@
       systemd:
         name: wg-quick@wg0
         state: restarted
-...

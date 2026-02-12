@@ -1,0 +1,56 @@
+---
+- hosts: servers
+  become: yes
+  gather_facts: yes
+  vars:
+    dns_target_ip: "10.99.0.1"
+  tasks:
+    - name: 1. Check IP Forwarding (Must be 1)
+      command: sysctl net.ipv4.ip_forward
+      register: ip_forward
+      changed_when: false
+
+    - name: 2. Check WireGuard Interface Status
+      command: wg show wg0
+      register: wg_status
+      changed_when: false
+
+    - name: 3. Check UDP Port 51820 (Firewall)
+      shell: ss -ulpn | grep 51820
+      register: port_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: 4. Check DNS Listener Process
+      # Modified to show exactly WHAT is listening.
+      # Valid: "*.53" or "10.99.0.1:53"
+      # Invalid: "127.0.0.53:53" (This is systemd-resolved, inaccessible to VPN)
+      shell: ss -ulpn | grep :53
+      register: dns_details
+      ignore_errors: yes
+      changed_when: false
+
+    - name: 5. Check IPTables NAT Rules (Masquerading)
+      shell: iptables -t nat -L POSTROUTING -n -v
+      register: nat_rules
+      changed_when: false
+
+    - name: 6. Check IPTables DNAT Rules (DNS Redirection)
+      shell: iptables -t nat -L PREROUTING -n -v
+      register: dnat_rules
+      changed_when: false
+
+    # --- Report ---
+    - name: "=== DEBUG REPORT ==="
+      debug:
+        msg:
+          - "IP Forwarding: {{ ip_forward.stdout }}"
+          - "WireGuard Port Open: {{ 'YES' if port_check.rc == 0 else 'NO (Critical)' }}"
+          - "--- DNS Listeners (Look for *:53 or 10.99.0.1:53) ---"
+          - "{{ dns_details.stdout_lines }}"
+          - "--- WireGuard Status ---"
+          - "{{ wg_status.stdout_lines }}"
+          - "--- NAT Masquerade Rules (Look for 10.99.0.0/24) ---"
+          - "{{ nat_rules.stdout_lines }}"
+          - "--- DNS Redirection Rules ---"
+          - "{{ dnat_rules.stdout_lines }}"

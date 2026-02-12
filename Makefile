@@ -1,4 +1,4 @@
-.PHONY: clean_known_hosts vpn-server-setup vpn-server-status vpn-client-add vpn-client-qrcode vpn-client-remove vpn-client-list help init
+.PHONY: clean_known_hosts vpn-server-setup vpn-server-status vpn-client-add vpn-client-qrcode vpn-client-remove vpn-client-list help init vpn-debug vpn-monitor
 
 .DEFAULT_GOAL := help
 
@@ -29,6 +29,19 @@ vpn-client-remove: check_ansible ## Remove a client
 
 vpn-client-list: check_ansible ## List all clients
 	@ansible-playbook -i inventory.ini wireguard_client_list.yml
+
+vpn-debug: check_ansible ## Debug VPN connection issues (IP forwarding, firewall, DNS)
+	@ansible-playbook -i inventory.ini server_debug_vpn.yml
+
+vpn-monitor: check_ansible ## Live monitor WireGuard & DNS logs (Ctrl+C to stop)
+	@echo "Starting live monitor..."
+	@SERVER_LINE=$$(grep 'ansible_host=' inventory.ini | head -n 1); \
+	HOST=$$(echo $$SERVER_LINE | tr ' ' '\n' | grep 'ansible_host=' | cut -d= -f2); \
+	USER=$$(echo $$SERVER_LINE | tr ' ' '\n' | grep 'ansible_user=' | cut -d= -f2); \
+	PORT=$$(echo $$SERVER_LINE | tr ' ' '\n' | grep 'ansible_port=' | cut -d= -f2); \
+	KEY=$$(echo $$SERVER_LINE | tr ' ' '\n' | grep 'ansible_ssh_private_key_file=' | cut -d= -f2); \
+	echo "Connecting to $$USER@$$HOST:$$PORT with key $$KEY..."; \
+	ssh -t -p $$PORT -i $$KEY $$USER@$$HOST "journalctl -u dns-filter -u wg-quick@wg0 -f -n 20"
 
 init: check_ansible ## Initialize the inventory file
 	@read -p "Enter server host: " server_host; \

@@ -1,0 +1,11 @@
+[Interface]
+Address = {{ client_address }}
+PrivateKey = {{ client_private_key.stdout }}
+DNS = {{ wireguard_gateway_ip }}
+
+[Peer]
+PublicKey = {{ server_public_key.stdout }}
+# Use ansible_host (public IP from inventory) if available, otherwise fallback to detected default IPv4
+Endpoint = {{ ansible_host | default(ansible_default_ipv4.address) }}:{{ wireguard_port }}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25

@@ -1,3 +1,4 @@
+---
 - hosts: servers
   become: yes
   gather_facts: yes
@@ -10,24 +11,28 @@
         that:
           - client_name is defined
           - client_name != ''
-        fail_msg: "The 'client_name' variable must be set"
+        fail_msg: "The 'client_name' variable must be set. Usage: make vpn-client-add"
 
-    - name: Fetch WireGuard configuration
-      command: ip addr show wg0
-      register: wg_config
+    # --- 1. Network & Config Discovery ---
+    - name: Get WireGuard interface config
+      command: wg show wg0
+      register: wg_show
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if WireGuard is not running
+      fail:
+        msg: "WireGuard (wg0) is not running. Please run 'make vpn-server-setup' first."
+      when: wg_show.rc != 0
+
+    - name: Get WireGuard IP from interface
+      shell: ip -4 addr show wg0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}'
+      register: wg_ip_result
       changed_when: false
 
-    - name: Extract WireGuard IP address
+    - name: Set WireGuard Gateway IP
       set_fact:
-        wireguard_address: "{{ wg_config.stdout_lines | select('search', 'inet ') | map('regex_replace', '.* inet (\\S+).*', '\\1') | first }}"
-      
-    - name: Derive subnet from WireGuard address
-      set_fact:
-        wireguard_subnet: "{{ wireguard_address | ansible.utils.ipaddr('subnet') }}"
-    
-    - name: Display subnet
-      debug:
-        msg: "The derived subnet of {{ wireguard_address }} is: {{ wireguard_subnet }}"
+        wireguard_gateway_ip: "{{ wg_ip_result.stdout }}"
 
     - name: Check if client configuration already exists
       stat:
@@ -39,106 +44,94 @@
         msg: "Client configuration for {{ client_name }} already exists!"
       when: client_conf.stat.exists
 
-    - name: Get last used client IP
+    # --- 2. IP Allocation Strategy ---
+    - name: Get list of used IPs from wg0.conf
       shell: |
         grep 'AllowedIPs' /etc/wireguard/wg0.conf | awk -F '[=/]' '{print $2}' | sort -V | tail -n1
       register: last_used_ip
       changed_when: false
       ignore_errors: true
 
-    - name: Set client IP if there are no clients yet
+    - name: Calculate next IP (First Client)
       set_fact:
-        client_address: "{{ (wireguard_subnet.split('/')[0] | ansible.utils.ipmath(2)) }}/32"
+        client_address: "{{ wireguard_gateway_ip | ansible.utils.ipmath(1) }}/32"
       when: last_used_ip.stdout | length == 0
 
-    - name: Derive next client IP
+    - name: Calculate next IP (Subsequent Clients)
       set_fact:
-        client_address: "{{ (wireguard_subnet.split('/')[0] | ansible.utils.ipmath((last_used_ip.stdout.split('.')[-1] | int) + 1)) }}/32"
+        client_address: "{{ (last_used_ip.stdout | trim | regex_replace('/32', '')) | ansible.utils.ipmath(1) }}/32"
       when: last_used_ip.stdout | length > 0
 
-    - name: Display next client ip
+    - name: Display assigned IP
       debug:
-        msg: "The derived next client ip is: {{ client_address }}"
+        msg: "Assigning IP {{ client_address }} to {{ client_name }}"
 
-    - name: Generate client keys
+    # --- 3. Key Generation ---
+    - name: Generate client private key
       command: wg genkey
       register: client_private_key
       changed_when: false
+      no_log: true
 
     - name: Derive client public key
       shell: echo "{{ client_private_key.stdout }}" | wg pubkey
       register: client_public_key
       changed_when: false
+      no_log: true
 
-    - name: Fetch server private key
-      shell: grep 'PrivateKey' /etc/wireguard/wg0.conf | awk '{print $3}'
-      register: server_private_key
-      changed_when: false
-      failed_when: server_private_key.rc != 0
-
-    - name: Derive server public key from fetched private key
-      shell: echo "{{ server_private_key.stdout }}" | wg pubkey
+    - name: Derive server public key from file
+      shell: wg pubkey < /etc/wireguard/privatekey
       register: server_public_key
       changed_when: false
-      failed_when: server_public_key.rc != 0
+      no_log: true
 
-    - name: Check if client is already added to the WireGuard configuration
-      shell: grep -q 'PublicKey = {{ client_public_key.stdout }}' /etc/wireguard/wg0.conf
-      register: client_added
+    # --- 4. Server Configuration Update ---
+    - name: Check if client peer exists in wg0.conf
+      shell: grep -q '{{ client_public_key.stdout }}' /etc/wireguard/wg0.conf
+      register: client_in_config
       ignore_errors: true
+      changed_when: false
 
-    - name: Add client to WireGuard configuration
+    - name: Add client peer to WireGuard server config
       blockinfile:
         path: /etc/wireguard/wg0.conf
+        marker: "# {mark} ANSIBLE MANAGED BLOCK FOR {{ client_name }}"
         block: |
           [Peer]
+          # {{ client_name }}
           PublicKey = {{ client_public_key.stdout }}
           AllowedIPs = {{ client_address }}
-        marker: "# {mark} ANSIBLE MANAGED BLOCK FOR {{ client_name }}"
-      register: added_to_config
-      when: not client_added.rc == 0
+      register: server_config_updated
+      when: client_in_config.rc != 0
 
-    - name: Setup client configuration
-      copy:
-        content: |
-          [Interface]
-          Address = {{ client_address }}
-          PrivateKey = {{ client_private_key.stdout }}
-          DNS = {{ wireguard_address.split('/')[0] }}
-
-          [Peer]
-          PublicKey = {{ server_public_key.stdout }}
-          Endpoint = {{ ansible_ssh_host }}:{{ wireguard_port }}
-          AllowedIPs = 0.0.0.0/0
+    # --- 5. Client Configuration Generation ---
+    - name: Generate client configuration file
+      template:
+        src: templates/client.conf.j2
         dest: "/etc/wireguard/{{ client_name }}.conf"
         owner: root
         group: root
         mode: '0600'
 
+    # --- 6. Packaging & Delivery ---
     - name: Zip the client configuration
-      command: 
+      command:
         cmd: zip {{ client_name }}.zip {{ client_name }}.conf
         chdir: /etc/wireguard
+      changed_when: false
 
-    - name: Fetch the zipped client configuration to local machine
+    - name: Fetch the zipped client configuration
       fetch:
         src: "/etc/wireguard/{{ client_name }}.zip"
         dest: "./"
         flat: yes
 
-    - name: Check if qrencode is installed
-      shell: which qrencode
-      register: qrencode_installed
-      failed_when: qrencode_installed.rc != 0
-      ignore_errors: true
-
-    - name: Install qrencode
-      apt:
+    - name: Ensure qrencode is installed
+      package:
         name: qrencode
         state: present
-      when: ansible_os_family == "Debian" and qrencode_installed.rc != 0
 
-    - name: Generate QR code for the client configuration
+    - name: Generate QR code
       shell: qrencode -t ansiutf8 < /etc/wireguard/{{ client_name }}.conf
       register: qr_code
       changed_when: false
@@ -148,8 +141,17 @@
         msg: "{{ qr_code.stdout_lines }}"
       run_once: true
 
-    - name: Restart WireGuard service
-      systemd:
-        name: wg-quick@wg0
-        state: restarted
-      when: added_to_config is changed
+    # --- 7. Service Reload (Robust Block/Rescue) ---
+    - name: Reload WireGuard Configuration
+      block:
+        - name: Attempt hot reload (syncconf)
+          shell: wg syncconf wg0 <(wg-quick strip wg0)
+          args:
+            executable: /bin/bash
+          when: server_config_updated is changed
+
+      rescue:
+        - name: Fallback to hard restart
+          systemd:
+            name: wg-quick@wg0
+            state: restarted

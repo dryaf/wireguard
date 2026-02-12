@@ -1,0 +1,19 @@
+[Interface]
+Address = {{ wireguard_address }}
+ListenPort = {{ wireguard_port }}
+PrivateKey = {{ server_priv_key_final }}
+
+# Ensure IP forwarding is enabled when interface comes up
+PostUp = sysctl -w net.ipv4.ip_forward=1
+PostUp = sysctl -w net.ipv6.conf.all.forwarding=1
+
+# Masquerade outgoing traffic on the default WAN interface
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o {{ ansible_default_ipv4.interface }} -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o {{ ansible_default_ipv4.interface }} -j MASQUERADE
+
+# Redirect DNS traffic (UDP/TCP 53) from VPN clients to the local DNS filter
+# This forces clients to use the specified DNS server (dnsfilter) even if they try to bypass it.
+PostUp = iptables -t nat -A PREROUTING -i wg0 -p udp --dport 53 -j DNAT --to {{ dns_server }}:53
+PostUp = iptables -t nat -A PREROUTING -i wg0 -p tcp --dport 53 -j DNAT --to {{ dns_server }}:53
+PostDown = iptables -t nat -D PREROUTING -i wg0 -p udp --dport 53 -j DNAT --to {{ dns_server }}:53
+PostDown = iptables -t nat -D PREROUTING -i wg0 -p tcp --dport 53 -j DNAT --to {{ dns_server }}:53
