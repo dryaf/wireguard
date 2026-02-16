@@ -4,7 +4,7 @@
   
   # --- PRE-TASKS: Prepare System ---
   pre_tasks:
-    - name: Ensure Apt Cache is updated (Fix for cache lock/stale errors)
+    - name: Ensure Apt Cache is updated
       apt:
         update_cache: yes
         cache_valid_time: 3600
@@ -20,26 +20,37 @@
     - role: devsec.hardening.os_hardening
     - role: devsec.hardening.ssh_hardening
       vars:
-        # Enforce key-only login
         ssh_password_authentication: "no"
         ssh_permit_root_login: "prohibit-password"
-        # Allow specific SSH users.
         ssh_allow_users: "root {{ ansible_user | default('') }}"
-        # Security tweaks
         ssh_client_alive_interval: 300
         ssh_client_alive_count_max: 5
-        # INCREASE AUTH TRIES: Prevents "Too many authentication failures" if user has many keys in agent
         ssh_max_auth_tries: 20
 
   vars:
+    wireguard_port: 51820
     sysctl_overwrite:
       net.ipv4.ip_forward: 1
       net.ipv6.conf.all.forwarding: 1
 
   tasks:
-    - name: Install Fail2Ban for brute-force protection
+    # --- CRITICAL FIX: Remove Conflicting Firewall Manager ---
+    - name: Remove conflicting iptables-persistent packages
       package:
-        name: fail2ban
+        name: ['iptables-persistent', 'netfilter-persistent']
+        state: absent
+
+    - name: Remove stale iptables state files (prevents overwrite on boot)
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/iptables/rules.v4
+        - /etc/iptables/rules.v6
+
+    - name: Install Dependencies (Fail2Ban, UFW)
+      package:
+        name: ['fail2ban', 'ufw']
         state: present
 
     - name: Ensure Fail2Ban is started and enabled
@@ -61,8 +72,68 @@
           bantime = 1h
       notify: Restart fail2ban
 
+    # --- IP Forwarding Fixes ---
+    - name: Force Enable IP Forwarding (IPv4)
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+        reload: yes
+        sysctl_file: /etc/sysctl.d/99-vpn-forwarding.conf
+
+    - name: Force Enable IP Forwarding (IPv6)
+      sysctl:
+        name: net.ipv6.conf.all.forwarding
+        value: '1'
+        state: present
+        reload: yes
+        sysctl_file: /etc/sysctl.d/99-vpn-forwarding.conf
+
+    # --- FIREWALL LOCKDOWN ---
+    - name: Set UFW defaults (Deny Incoming, Allow Outgoing)
+      community.general.ufw:
+        default: deny
+        direction: incoming
+      notify: Reload UFW
+
+    - name: Allow SSH connections
+      community.general.ufw:
+        rule: allow
+        port: "{{ ansible_port | default(22) }}"
+        proto: tcp
+        comment: "Allow SSH"
+
+    - name: Allow WireGuard UDP traffic
+      community.general.ufw:
+        rule: allow
+        port: "{{ wireguard_port }}"
+        proto: udp
+        comment: "Allow WireGuard VPN tunnel"
+
+    - name: Allow all traffic from WireGuard interface (wg0)
+      community.general.ufw:
+        rule: allow
+        direction: in
+        interface: wg0
+        comment: "Allow VPN clients to access internal services"
+
+    - name: Ensure UFW Forward Policy is ACCEPT
+      lineinfile:
+        path: /etc/default/ufw
+        regexp: "^DEFAULT_FORWARD_POLICY="
+        line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'
+      notify: Reload UFW
+
+    - name: Enable UFW
+      community.general.ufw:
+        state: enabled
+
   handlers:
     - name: Restart fail2ban
       systemd:
         name: fail2ban
         state: restarted
+
+    - name: Reload UFW
+      community.general.ufw:
+        state: reloaded

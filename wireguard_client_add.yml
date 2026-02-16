@@ -4,6 +4,7 @@
   gather_facts: yes
   vars:
     wireguard_port: 51820
+    wireguard_mtu: 1280
     client_name: "{{ lookup('env', 'CLIENT_NAME') }}"
   tasks:
     - name: Validate client_name variable
@@ -46,8 +47,9 @@
 
     # --- 2. IP Allocation Strategy ---
     - name: Get list of used IPs from wg0.conf
+      # Improved grep to specifically look for peer AllowedIPs
       shell: |
-        grep 'AllowedIPs' /etc/wireguard/wg0.conf | awk -F '[=/]' '{print $2}' | sort -V | tail -n1
+        grep 'AllowedIPs' /etc/wireguard/wg0.conf | grep -v '/24' | awk -F '[=/]' '{print $2}' | sort -V | tail -n1
       register: last_used_ip
       changed_when: false
       ignore_errors: true

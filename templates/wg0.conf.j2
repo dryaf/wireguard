@@ -2,6 +2,7 @@
 Address = {{ wireguard_address }}
 ListenPort = {{ wireguard_port }}
 PrivateKey = {{ server_priv_key_final }}
+MTU = {{ wireguard_mtu | default(1280) }}
 
 # Ensure IP forwarding is enabled when interface comes up
 PostUp = sysctl -w net.ipv4.ip_forward=1

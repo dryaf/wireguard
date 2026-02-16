@@ -10,7 +10,7 @@
       register: ip_forward
       changed_when: false
 
-    - name: 2. Check WireGuard Interface Status
+    - name: 2. Check WireGuard Interface Status (MTU & Key)
       command: wg show wg0
       register: wg_status
       changed_when: false
@@ -23,8 +23,6 @@
 
     - name: 4. Check DNS Listener Process
       # Modified to show exactly WHAT is listening.
-      # Valid: "*.53" or "10.99.0.1:53"
-      # Invalid: "127.0.0.53:53" (This is systemd-resolved, inaccessible to VPN)
       shell: ss -ulpn | grep :53
       register: dns_details
       ignore_errors: yes
@@ -46,6 +44,12 @@
       changed_when: false
       failed_when: false
 
+    - name: 8. Check for Recent Handshakes
+      # Dumps handshakes in seconds since epoch. Helps find dead peers.
+      shell: wg show wg0 latest-handshakes
+      register: handshakes
+      changed_when: false
+
     # --- Report ---
     - name: "=== DEBUG REPORT ==="
       debug:
@@ -56,8 +60,10 @@
           - "{{ ufw_status.stdout_lines | default(['UFW Not Installed/Active']) }}"
           - "--- DNS Listeners (Look for *:53 or 10.99.0.1:53) ---"
           - "{{ dns_details.stdout_lines }}"
-          - "--- WireGuard Status ---"
+          - "--- WireGuard Status (Check MTU should be 1280) ---"
           - "{{ wg_status.stdout_lines }}"
+          - "--- Handshake Status (0 means never connected) ---"
+          - "{{ handshakes.stdout_lines }}"
           - "--- NAT Masquerade Rules (Look for 10.99.0.0/24) ---"
           - "{{ nat_rules.stdout_lines }}"
           - "--- DNS Redirection Rules ---"
