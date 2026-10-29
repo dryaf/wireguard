@@ -1,0 +1,115 @@
+---
+- name: Check whether the administrator disabled this profile
+  ansible.builtin.stat:
+    path: "{{ wireguard_apparmor_path | dirname }}/disable/{{ wireguard_apparmor_path | basename }}"
+    follow: false
+  register: wireguard_apparmor_disabled
+
+- name: Extend the enabled WireGuard profile
+  when: not wireguard_apparmor_disabled.stat.exists
+  block:
+    - name: Read the distribution profile
+      ansible.builtin.slurp:
+        src: "{{ wireguard_apparmor_path }}"
+      register: wireguard_apparmor_source
+
+    - name: Require the distribution's local customization include
+      ansible.builtin.assert:
+        that:
+          - "(wireguard_apparmor_source.content | b64decode) is search('include(?: if exists)?\\s+<local/' ~ (wireguard_apparmor_path | basename | regex_escape) ~ '>')"
+        fail_msg: "The WireGuard AppArmor profile lacks its expected local include. Add support for this profile before deploying the VPN."
+
+    - name: Check for an existing local policy
+      ansible.builtin.stat:
+        path: "{{ wireguard_apparmor_local }}"
+      register: wireguard_apparmor_local_before
+
+    - name: Identify the parent profile name
+      ansible.builtin.command:
+        argv: [apparmor_parser, --names, --skip-cache, "{{ wireguard_apparmor_path }}"]
+      register: wireguard_apparmor_names
+      changed_when: false
+
+    - name: Require a supported parent profile
+      ansible.builtin.assert:
+        that:
+          - "(wireguard_apparmor_names.stdout_lines | reject('search', '//') | list) in [['wg-quick'], ['/usr/bin/wg-quick']]"
+        fail_msg: 'The installed WireGuard AppArmor profile has an unsupported parent name.'
+
+    - name: Record the parent profile name
+      ansible.builtin.set_fact:
+        wireguard_apparmor_name: "{{ wireguard_apparmor_names.stdout_lines | reject('search', '//') | first }}"
+
+    - name: Create the local AppArmor policy directory
+      ansible.builtin.file:
+        path: "{{ wireguard_apparmor_local | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install and validate the confined firewall hook
+      block:
+        - name: Add the managed child profile while preserving local rules
+          ansible.builtin.blockinfile:
+            path: "{{ wireguard_apparmor_local }}"
+            create: true
+            backup: true
+            owner: root
+            group: root
+            mode: '0644'
+            marker: '# {mark} WIREGUARD MANAGER FIREWALL'
+            block: "{{ lookup('ansible.builtin.template', 'templates/wireguard-apparmor-local.j2') }}"
+          register: wireguard_apparmor_update
+
+        - name: Compile the complete profile before loading it
+          ansible.builtin.command:
+            argv: [apparmor_parser, --skip-kernel-load, --skip-cache, "{{ wireguard_apparmor_path }}"]
+          changed_when: false
+
+        - name: Load the confined firewall hook
+          ansible.builtin.command:
+            argv: [apparmor_parser, --replace, --skip-cache, "{{ wireguard_apparmor_path }}"]
+          changed_when: wireguard_apparmor_update.changed
+
+        - name: Exercise the hook inside AppArmor without changing firewall rules
+          ansible.builtin.command:
+            argv:
+              - aa-exec
+              # Enter wg-quick first so exec uses its child-profile transition.
+              - --immediate
+              - "--profile={{ wireguard_apparmor_name }}"
+              - --
+              - /usr/local/lib/wireguard-manager/wireguard_firewall.py
+              - check
+          changed_when: false
+
+      rescue:
+        - name: Restore the previous local policy
+          ansible.builtin.copy:
+            src: "{{ wireguard_apparmor_update.backup_file }}"
+            dest: "{{ wireguard_apparmor_local }}"
+            remote_src: true
+            mode: preserve
+          when: wireguard_apparmor_update.backup_file is defined
+
+        - name: Remove a rejected first-time local policy
+          ansible.builtin.file:
+            path: "{{ wireguard_apparmor_local }}"
+            state: absent
+          when: not wireguard_apparmor_local_before.stat.exists
+
+        - name: Reload the restored policy
+          ansible.builtin.command:
+            argv: [apparmor_parser, --replace, --skip-cache, "{{ wireguard_apparmor_path }}"]
+          changed_when: false
+
+        - name: Stop before changing the DNS service or VPN configuration
+          ansible.builtin.fail:
+            msg: "The WireGuard AppArmor extension failed validation or loading; the previous local policy was restored. {{ ansible_failed_result.msg | default('Inspect the AppArmor parser error above.') }}"
+
+    - name: Remove the completed local policy backup
+      ansible.builtin.file:
+        path: "{{ wireguard_apparmor_update.backup_file }}"
+        state: absent
+      when: wireguard_apparmor_update.backup_file is defined

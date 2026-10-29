@@ -84,11 +84,19 @@ class ActionModule(ActionBase):
             elif argv[0] == 'mkdir':
                 created = subprocess.run(argv, text=True, capture_output=True)
                 rc, stdout, stderr = created.returncode, created.stdout, created.stderr
+            elif argv[0] == 'iptables':
+                stdout = '-A PREROUTING -i wg0 -p udp --dport 53 -m comment --comment wireguard-manager:wg0 -j DNAT --to-destination 10.99.0.1:1053'
             elif argv[-1] == 'unprotect-dns':
                 stdout = '{"ok": true, "changed": true}'
             else:
                 raise AssertionError('Unexpected fixture command: ' + repr(argv))
             result.update(rc=rc, stdout=stdout, stderr=stderr, failed=rc != 0)
+        elif operation == 'uri':
+            result['status'] = 200 if state['running'] and state['healthy'] else -1
+            if args['url'].endswith('/health'):
+                result['content'] = 'OK' if result['status'] == 200 else ''
+            elif result['status'] == 200:
+                result['json'] = dict(requests_total=12, blocked_total=2, errors_total=0, cache_hits=3)
         elif operation != 'packages':
             raise AssertionError('Unexpected fixture action: ' + operation)
         path.write_text(json.dumps(state))
@@ -99,7 +107,10 @@ class ActionModule(ActionBase):
 def run_tests(binary):
     scenarios = ("success", "invalid_config", "failed_readiness", "foreign_dns", "first_install_failure",
                  "failed_vpn", "failed_rollback", "orphan_container", "foreign_service",
-                 "stale_service_failure", "ports_in_use", "failed_vpn_rollback", "busy_deployment")
+                 "stale_service_failure", "ports_in_use", "failed_vpn_rollback", "busy_deployment",
+                 "preserve_policy", "update_ads", "update_noop", "update_invalid_config",
+                 "update_failed_readiness", "update_failed_rollback", "update_check_mode",
+                 "status", "status_failed", "status_missing")
     for scenario in scenarios:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -113,14 +124,25 @@ def run_tests(binary):
             if scenario == "busy_deployment":
                 deployment_lock.mkdir()
             previous = templates().get_template("dnsfilter.yml.j2").render(wireguard_address="10.99.0.1/24", dnsfilter_block_malware=False)
+            management = scenario.startswith(('update_', 'status'))
+            if scenario == 'update_ads':
+                previous = yaml.safe_load(previous)
+                previous.pop('resolver_anti_ads')
+                previous['whitelist'] = ['allowed.example']
+                previous = yaml.safe_dump(previous)
+            elif scenario == 'update_invalid_config':
+                previous = yaml.safe_load(previous)
+                previous.pop('resolver_anti_porn')
+                previous = yaml.safe_dump(previous)
             config.write_text(previous)
-            config.chmod(0o600)
-            unit.write_text("# Managed by the WireGuard project\nprevious unit\n")
+            config.chmod(0o444 if management else 0o600)
+            unit.write_text(templates().get_template('wireguard-dnsfilter.service.j2').render(dnsfilter_image_id='sha256:' + 'a' * 64))
+            unit.chmod(0o644)
             previous_unit = unit.read_bytes()
             state_path = root / "state.json"
             state = dict(running=True, healthy=True, enabled=True, starts=0, previous_config=previous, events=[],
-                         fail_candidate=scenario in {"failed_readiness", "foreign_dns", "first_install_failure", "failed_rollback", "orphan_container", "stale_service_failure"},
-                         foreign_dns=scenario == "foreign_dns", fail_rollback=scenario in {"failed_rollback", "failed_vpn_rollback"},
+                         fail_candidate=scenario in {"failed_readiness", "foreign_dns", "first_install_failure", "failed_rollback", "orphan_container", "stale_service_failure", "update_failed_readiness", "update_failed_rollback"},
+                         foreign_dns=scenario == "foreign_dns", fail_rollback=scenario in {"failed_rollback", "failed_vpn_rollback", "update_failed_rollback"},
                          orphan=scenario == "orphan_container", ports_in_use=scenario == "ports_in_use")
             if scenario in {"first_install_failure", "stale_service_failure", "ports_in_use", "foreign_service"}:
                 config.unlink()
@@ -130,6 +152,15 @@ def run_tests(binary):
                 state.update(running=True, enabled=True, foreign_service={"state": "running", "status": "enabled"})
             elif scenario == "stale_service_failure":
                 state["foreign_service"] = {"state": "stopped", "status": "not-found"}
+            elif scenario == 'status_missing':
+                config.unlink()
+                unit.unlink()
+                state.update(running=False, enabled=False)
+            elif scenario == 'status_failed':
+                state.update(running=False, healthy=False)
+            if state['running']:
+                receipt.parent.mkdir(parents=True, exist_ok=True)
+                receipt.write_text('a' * 64)
             state_path.write_text(json.dumps(state))
             plugins = root / "plugins"
             plugins.mkdir()
@@ -156,7 +187,7 @@ def run_tests(binary):
                 if not isinstance(value, dict):
                     return value
                 result = {key: adapt(item) for key, item in value.items()}
-                for module, operation in (("systemd_service", "service"), ("service_facts", "facts"), ("apt", "packages"), ("command", "command")):
+                for module, operation in (("systemd_service", "service"), ("service_facts", "facts"), ("apt", "packages"), ("command", "command"), ("uri", "uri")):
                     key = "ansible.builtin." + module
                     if key in result:
                         result["dnsfilter_fixture"] = dict(result.pop(key) or {}, operation=operation)
@@ -169,7 +200,7 @@ def run_tests(binary):
                     result["delay"] = 0
                 return result
 
-            for name in ("install_dnsfilter.yml", "verify_dnsfilter.yml", "rollback_dnsfilter.yml"):
+            for name in ("install_dnsfilter.yml", "verify_dnsfilter.yml", "rollback_dnsfilter.yml", "dnsfilter_status.yml"):
                 data = yaml.safe_load((ROOT / "tasks" / name).read_text())
                 (tasks_dir / name).write_text(yaml.safe_dump(adapt(data), sort_keys=False))
             main_play = yaml.safe_load((ROOT / "wireguard_server_setup.yml").read_text())[0]
@@ -182,17 +213,50 @@ def run_tests(binary):
                              wireguard_address="10.99.0.1/24", wireguard_setup_complete=False,
                              fixture_state=str(state_path), fixture_config=str(config), fixture_unit=str(unit),
                              fixture_receipt=str(receipt), fixture_binary=binary)
+            if scenario == 'preserve_policy':
+                variables.pop('dnsfilter_block_malware')
+                variables.pop('dnsfilter_block_porn')
             playbook = root / "test.yml"
-            playbook.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": variables,
-                "tasks": [{"ansible.builtin.include_tasks": "tasks/install_dnsfilter.yml"}, combined]}], sort_keys=False))
-            result = subprocess.run(["ansible-playbook", "-i", "localhost,", str(playbook)], text=True, capture_output=True, timeout=90,
+            if management:
+                play = adapt(yaml.safe_load((ROOT / 'wireguard_dnsfilter.yml').read_text())[0])
+                play.update(hosts='localhost', become=False)
+                variables.update(dnsfilter_action='status' if scenario.startswith('status') else 'update',
+                                 dnsfilter_category='malware' if scenario == 'update_noop' else ('porn' if scenario == 'update_invalid_config' else 'ads'),
+                                 dnsfilter_value=scenario != 'update_noop')
+                play['vars'].update(variables)
+            else:
+                play = {"hosts": "localhost", "gather_facts": False, "vars": variables,
+                        "tasks": [{"ansible.builtin.include_tasks": "tasks/install_dnsfilter.yml"}, combined]}
+            playbook.write_text(yaml.safe_dump([play], sort_keys=False))
+            extra = ['--check'] if scenario == 'update_check_mode' else []
+            result = subprocess.run(["ansible-playbook", "-i", "localhost,", str(playbook), *extra], text=True, capture_output=True, timeout=90,
                                     env=dict(os.environ, ANSIBLE_ACTION_PLUGINS=str(plugins), ANSIBLE_FILTER_PLUGINS=str(ROOT / "filter_plugins")))
             output = result.stdout + result.stderr
             state = json.loads(state_path.read_text())
-            assert (result.returncode == 0) == (scenario == "success"), output
+            successes = {'success', 'preserve_policy', 'update_ads', 'update_noop', 'status', 'status_failed', 'update_check_mode'}
+            assert (result.returncode == 0) == (scenario in successes), output
             if scenario == "success":
                 assert yaml.safe_load(config.read_text())["filter_malware"] is True
                 assert state["running"] and state["healthy"]
+            elif scenario == 'preserve_policy':
+                assert yaml.safe_load(config.read_text())['filter_malware'] is False, output
+            elif scenario == 'update_ads':
+                policy = yaml.safe_load(config.read_text())
+                assert policy['filter_ads'] is True and policy['filter_malware'] is False, output
+                assert policy['whitelist'] == ['allowed.example'] and 'resolver_anti_ads' in policy, output
+                assert unit.read_bytes() == previous_unit and state['starts'] == 1, output
+            elif scenario in {'update_noop', 'status', 'status_failed', 'update_check_mode'}:
+                assert config.read_text() == previous and unit.read_bytes() == previous_unit, output
+                assert state['starts'] == 0, output
+                if scenario in {'status', 'status_failed'}:
+                    assert 'changed=0' in output, output
+                if scenario == 'status_failed':
+                    assert '"healthy": false' in output and 'unavailable' in output, output
+                else:
+                    assert '"healthy": true' in output and 'requests_total' in output, output
+            elif scenario == 'status_missing':
+                assert not config.exists() and not unit.exists(), output
+                assert 'DNSFILTER=yes make vpn-server-setup' in output, output
             elif scenario in {"first_install_failure", "stale_service_failure", "ports_in_use"}:
                 assert not config.exists() and not unit.exists(), output
                 assert not state["running"] and not state["enabled"], output
@@ -204,14 +268,16 @@ def run_tests(binary):
                 assert not any(event[0] == "command" and event[1]["argv"][-1] == "unprotect-dns" for event in state["events"]), output
             else:
                 assert config.read_text() == previous and unit.read_bytes() == previous_unit, output
-                assert config.stat().st_mode & 0o777 == 0o600, output
-                if scenario not in {"failed_rollback", "failed_vpn_rollback"}:
+                assert config.stat().st_mode & 0o777 == (0o444 if management else 0o600), output
+                if scenario not in {"failed_rollback", "failed_vpn_rollback", "update_failed_rollback"}:
                     assert state["running"] and state["healthy"], output
             backups = list(directory.glob(".deploy-*/previous-config"))
-            assert bool(backups) == (scenario in {"failed_rollback", "orphan_container", "failed_vpn_rollback"}), output
+            assert bool(backups) == (scenario in {"failed_rollback", "orphan_container", "failed_vpn_rollback", "update_failed_rollback"}), output
             assert deployment_lock.exists() == (bool(backups) or scenario == "busy_deployment"), output
             if backups:
                 assert str(backups[0].parent) in output, output
             else:
                 assert not list(directory.glob(".deploy-*")), output
+            if management:
+                assert not any(event[0] == 'packages' or event[1].get('argv', [])[:2] == ['podman', 'build'] for event in state['events']), output
             print(f"PASS: Ansible DNS deployment {scenario.replace('_', ' ')} (simulated runtime)")

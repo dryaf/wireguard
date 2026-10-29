@@ -29,6 +29,8 @@ def main():
     if config.exists():
         raise SystemExit("Integration tests require a fresh container without an existing wg0.conf")
     from test_native_firewall import run_tests
+    from test_apparmor_policy import check_profile_syntax
+    check_profile_syntax()
     run_tests(environment)
     platform_checks(environment)
     if sys.argv[1:] == ["--firewall-only"]:
@@ -46,7 +48,7 @@ def main():
     private = run_command(["wg", "genkey"]).strip()
     atomic_write(directory / "privatekey", private)
     values = dict(wireguard_address="10.99.0.1/24", wireguard_port=51820, wireguard_mtu=1280,
-                  server_priv_key_final=private, ansible_default_ipv4={"interface": "wan0"}, dns_server="1.1.1.1")
+                  server_priv_key_final=private, ansible_facts={"default_ipv4": {"interface": "wan0"}}, dns_server="1.1.1.1")
     original = environment.get_template("wg0.conf.j2").render(**values).rstrip() + "\n"
     atomic_write(config, original)
     stage = directory / "stage"

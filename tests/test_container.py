@@ -240,6 +240,27 @@ class ContainerLauncherTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Container engine not found", result.stderr)
 
+    def test_dns_controls_mount_only_inventory_trust_and_agent(self):
+        (self.root / 'inventory.ini').write_text('[servers]\nvpn ansible_host=192.0.2.1\n')
+        (self.root / 'known_hosts').write_text('verified key fixture\n')
+        with socket.socket(socket.AF_UNIX) as agent:
+            agent_path = str(self.root / 'agent')
+            agent.bind(agent_path)
+            self.environment.update(SSH_AUTH_SOCK=agent_path, CLIENT_NAME='unrelated', DNSFILTER='no')
+            commands = ('dnsfilter-status', 'dnsfilter-logs', 'dnsfilter-monitor', *container_cli.DNSFILTER_CHANGES)
+            for command in commands:
+                with self.subTest(command=command):
+                    args = json.loads(self.invoke(command).stdout)
+                    mounts = [args[index + 1] for index, arg in enumerate(args) if arg == '--mount']
+                    self.assertEqual(mounts, [
+                        f'type=bind,src={self.root}/inventory.ini,dst=/run/wireguard/inventory.ini,readonly',
+                        f'type=bind,src={self.root}/known_hosts,dst=/run/wireguard/known_hosts,readonly',
+                        f'type=bind,src={self.root}/agent,dst=/run/wireguard/ssh-agent,readonly',
+                    ])
+                    self.assertNotIn('DNSFILTER', args)
+                    self.assertNotIn('CLIENT_NAME', args)
+                    self.assertEqual(args[-1], command)
+
     def test_native_fixture_is_rootless_isolated_and_cleaned_up_on_failure(self):
         log = self.root / "engine-calls.jsonl"
         self.engine.write_text(
@@ -290,7 +311,9 @@ class ContainerCommandTests(unittest.TestCase):
                     "ansible_connection": "local", "ansible_python_interpreter": sys.executable,
                     "wireguard_address": "10.99.0.1/24", "wireguard_port": 51820,
                     "server_priv_key_final": "TEST_ONLY", "dns_server": "1.1.1.1",
-                    "ansible_default_ipv4": {"interface": "eth0"},
+                    "ansible_facts": {"default_ipv4": {"interface": "eth0", "address": "192.0.2.1"}},
+                    "client_address": "10.99.0.2/32", "client_private_key": {"stdout": "TEST_ONLY"},
+                    "server_public_key": {"stdout": "TEST_ONLY"}, "wireguard_gateway_ip": "10.99.0.1",
                 },
                 "tasks": [
                     {"ansible.builtin.assert": {"that": ["'phone' | wireguard_valid_client_name"]}},
@@ -299,14 +322,21 @@ class ContainerCommandTests(unittest.TestCase):
                     {"ansible.builtin.template": {"src": str(ROOT / "templates/wg0.conf.j2"),
                                                   "dest": str(destination), "mode": "0600"},
                      "delegate_to": "localhost", "become": False},
+                    {"ansible.builtin.template": {"src": str(ROOT / "templates/client.conf.j2"),
+                                                  "dest": str(root / 'client.conf'), "mode": "0600"},
+                     "delegate_to": "localhost", "become": False},
                 ],
             }]))
-            environment = dict(os.environ, ANSIBLE_FILTER_PLUGINS=str(ROOT / "filter_plugins"))
+            environment = dict(os.environ, ANSIBLE_FILTER_PLUGINS=str(ROOT / "filter_plugins"), ANSIBLE_INJECT_FACTS_AS_VARS='False')
             result = subprocess.run(["ansible-playbook", "-i", "fixture,", str(playbook)],
                                     cwd=ROOT, env=environment, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("PrivateKey = TEST_ONLY", destination.read_text())
             self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+            # A delegated task gets localhost's connection variables. This
+            # fixture verifies templating with injected fact aliases disabled.
+            self.assertIn('Endpoint = localhost:51820', (root / 'client.conf').read_text())
+            self.assertNotIn('INJECT_FACTS_AS_VARS', result.stderr)
 
     def test_dns_is_validated_before_ansible_runs(self):
         for value in ("1.1.1.1 ansible_connection=local", "$(id)", "1.1.1.1;id", "2001:db8::1"):
@@ -333,11 +363,11 @@ class ContainerCommandTests(unittest.TestCase):
             known_hosts.write_text("previous trusted key\n")
             endpoints = [("vpn", "192.0.2.1", 2222, {})]
             scan = subprocess.CompletedProcess([], 0, stdout="[192.0.2.1]:2222 ssh-ed25519 KEY\n")
-            fingerprint = subprocess.CompletedProcess([], 0, stdout="256 SHA256:actual host (ED25519)\n")
+            fingerprint = subprocess.CompletedProcess([], 0, stdout=f"256 SHA256:{'A' * 43} host (ED25519)\n")
             with patch.object(container_cli, "KNOWN_HOSTS", known_hosts), \
                     patch.object(container_cli, "servers", return_value=endpoints), \
                     patch.object(container_cli, "run", side_effect=[scan, fingerprint]), \
-                    patch("builtins.input", return_value="SHA256:expected"):
+                    patch("builtins.input", return_value="SHA256:" + "B" * 43):
                 with self.assertRaisesRegex(ValueError, "Fingerprint mismatch"):
                     container_cli.update_known_hosts(trust=True)
             self.assertEqual(known_hosts.read_text(), "previous trusted key\n")

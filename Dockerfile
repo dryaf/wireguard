@@ -134,7 +134,7 @@ ENTRYPOINT ["python", "scripts/container_cli.py"]
 
 FROM python-deps AS network-tools
 RUN apt-get update --error-on=any \
-    && apt-get install --yes --no-install-recommends wireguard-tools iproute2 iptables procps systemd dbus ufw fail2ban python3-systemd unattended-upgrades openssh-server \
+    && apt-get install --yes --no-install-recommends wireguard-tools iproute2 iptables procps systemd dbus ufw fail2ban python3-systemd unattended-upgrades openssh-server apparmor \
     && rm -rf /var/lib/apt/lists/* /tmp/ansible /tmp/wireguard /tmp/cache
 
 FROM network-tools AS network-tests

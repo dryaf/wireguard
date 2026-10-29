@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "files"), str(ROOT / "filter_plugins")]
 
 from wireguard_manager import OperationError, WireGuardManager, atomic_write, sections
+from wireguard_firewall import run_command
 from wireguard import FilterModule
 
 
@@ -111,7 +112,7 @@ class ManagerFixture(unittest.TestCase):
             client_address="$WG_CLIENT_ADDRESS", client_private_key={"stdout": "$WG_CLIENT_PRIVATE_KEY"},
             server_public_key={"stdout": "$WG_SERVER_PUBLIC_KEY"}, wireguard_gateway_ip="$WG_GATEWAY_IP",
             wireguard_port="$WG_SERVER_PORT", ansible_host="vpn.example.com",
-            ansible_default_ipv4={"address": "192.0.2.1"},
+            ansible_facts={"default_ipv4": {"address": "192.0.2.1"}},
         )
         path = self.directory / "client.template"
         path.write_text(text)
@@ -265,8 +266,9 @@ class ApplyTests(ManagerFixture):
         candidate = self.stage()
         original = (self.directory / "wg0.conf").read_text()
         self.system.fail_start = True
-        with self.assertRaisesRegex(OperationError, "previous configuration was restored"):
+        with self.assertRaisesRegex(OperationError, "previous configuration was restored") as raised:
             self.manager.apply(candidate)
+        self.assertIn("Simulated invalid new configuration", str(raised.exception))
         self.assertEqual((self.directory / "wg0.conf").read_text(), original)
         self.assertTrue(self.system.active)
 
@@ -416,6 +418,22 @@ class ConcurrencyTests(ManagerFixture):
         holder.join(5)
         with contender.locked():
             self.assertTrue((self.directory / ".management.lock").exists())
+
+
+class CommandFailureTests(unittest.TestCase):
+    def test_service_failure_gives_diagnostics_without_exposing_process_output(self):
+        with patch("wireguard_firewall.subprocess.run") as process:
+            process.return_value.returncode = 1
+            process.return_value.stdout = "PRIVATE_KEY_IN_STDOUT"
+            process.return_value.stderr = "PRIVATE_KEY_IN_STDERR"
+            for command in (["systemctl", "enable", "--now", "wg-quick@wg0"], ["wg", "pubkey"]):
+                with self.subTest(command=command), self.assertRaises(OperationError) as raised:
+                    run_command(command, stdin="PRIVATE_KEY_IN_STDIN")
+                message = str(raised.exception)
+                self.assertNotIn("PRIVATE_KEY", message)
+                if command[0] == "systemctl":
+                    self.assertIn("journalctl -u wg-quick@wg0", message)
+                    self.assertIn("AppArmor", message)
 
 
 if __name__ == "__main__":

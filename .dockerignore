@@ -45,3 +45,4 @@ tests/**
 !wireguard_client_remove.yml
 !wireguard_server_setup.yml
 !wireguard_server_status.yml
+!wireguard_dnsfilter.yml

@@ -12,7 +12,7 @@
       apt:
         name: qrencode
         state: present
-      when: ansible_os_family == "Debian"
+      when: ansible_facts.os_family == "Debian"
 
     - name: Generate QR code for the client configuration
       command:

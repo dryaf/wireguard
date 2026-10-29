@@ -1,0 +1,55 @@
+---
+- name: Inspect or change the installed DNS filter
+  hosts: servers
+  become: true
+  gather_facts: false
+  vars:
+    dnsfilter_action: status
+
+  tasks:
+    - name: Validate the requested DNS operation before changing anything
+      ansible.builtin.assert:
+        that:
+          - dnsfilter_action in ['status', 'update']
+          - dnsfilter_action != 'update' or dnsfilter_category | default('') in ['ads', 'porn', 'malware']
+          - dnsfilter_action != 'update' or dnsfilter_value | default(none) is boolean
+
+    - name: Require an installed managed DNS configuration
+      ansible.builtin.stat:
+        path: /etc/wireguard-dnsfilter/config.yml
+        follow: false
+      register: dnsfilter_installed_config
+
+    - name: Explain how to install DNS filtering if it is missing
+      ansible.builtin.assert:
+        that:
+          - dnsfilter_installed_config.stat.exists
+          - dnsfilter_installed_config.stat.isreg | default(false)
+          - not dnsfilter_installed_config.stat.islnk | default(false)
+        fail_msg: 'Install DNS filtering first: DNSFILTER=yes make vpn-server-setup'
+
+    - name: Apply a validated category change with DNS recovery
+      ansible.builtin.include_tasks: tasks/install_dnsfilter.yml
+      vars:
+        dnsfilter_update_only: true
+      when: dnsfilter_action == 'update' and not ansible_check_mode
+
+    - name: Remove recovery files after a successful policy change
+      ansible.builtin.file:
+        path: "{{ dnsfilter_stage.path }}"
+        state: absent
+      when: dnsfilter_action == 'update' and not ansible_check_mode
+
+    - name: Release the completed policy change's deployment lock
+      ansible.builtin.file:
+        path: /run/wireguard-dnsfilter-setup.lock
+        state: absent
+      when: dnsfilter_action == 'update' and not ansible_check_mode
+
+    - name: Explain check mode for policy changes
+      ansible.builtin.debug:
+        msg: 'Check mode: no policy changes were applied; showing the currently installed policy.'
+      when: dnsfilter_action == 'update' and ansible_check_mode
+
+    - name: Show current service health, flags and counters
+      ansible.builtin.include_tasks: tasks/dnsfilter_status.yml

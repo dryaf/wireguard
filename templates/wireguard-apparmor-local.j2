@@ -1,0 +1,26 @@
+# Run only the project's root-owned firewall hook in a confined child profile.
+/usr/local/lib/wireguard-manager/wireguard_firewall.py rCx -> wireguard-firewall,
+signal (receive) set=(chld) peer=@{profile_name}//wireguard-firewall,
+
+profile wireguard-firewall {
+  include <abstractions/base>
+
+  capability net_admin,
+  capability net_raw,
+  network netlink raw,
+  network inet raw,
+  network inet6 raw,
+
+  /usr/bin/python3{,.[0-9]*} mrix,
+  /usr/local/lib/wireguard-manager/ r,
+  /usr/local/lib/wireguard-manager/{wireguard_firewall,wireguard}.py r,
+  /usr/local/lib/wireguard-manager/__pycache__/ r,
+  /usr/local/lib/wireguard-manager/__pycache__/{wireguard_firewall,wireguard}.*.pyc r,
+  /{usr/,}sbin/xtables-{legacy,nft}-multi mrix,
+  /etc/wireguard/.firewall.lock rwk,
+  /run/xtables.lock rwk,
+  @{PROC}/@{pid}/net/ip{,6}_tables_{names,matches,targets} r,
+
+  signal (send) set=(chld) peer={wg-quick,/usr/bin/wg-quick},
+  signal (receive) peer={wg-quick,/usr/bin/wg-quick},
+}

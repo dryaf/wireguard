@@ -7,7 +7,7 @@ MTU = {{ wireguard_mtu | default(1280) | wireguard_number(1280, 65535) }}
 [Peer]
 PublicKey = {{ server_public_key.stdout }}
 # Use ansible_host (public IP from inventory) if available, otherwise fallback to detected default IPv4
-Endpoint = {{ (ansible_host | default((ansible_default_ipv4 | default({})).address | default(''))) | wireguard_endpoint_host }}:{{ wireguard_port }}
+Endpoint = {{ (ansible_host | default((ansible_facts | default({})).get('default_ipv4', {}).get('address', ''))) | wireguard_endpoint_host }}:{{ wireguard_port }}
 # Capture IPv6 too, so it cannot bypass this IPv4-only VPN.
 AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25

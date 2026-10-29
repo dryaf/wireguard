@@ -8,8 +8,6 @@
     wireguard_mtu: 1280
     dns_server: '1.1.1.1'
     dnsfilter_enabled: false
-    dnsfilter_block_malware: true
-    dnsfilter_block_porn: false
 
   tasks:
     - name: Validate platform and server settings
@@ -45,6 +43,9 @@
 
     - name: Install transaction helper
       import_tasks: tasks/install_wireguard_manager.yml
+
+    - name: Permit the confined firewall hook before deploying DNS or VPN changes
+      ansible.builtin.import_tasks: tasks/configure_wireguard_apparmor.yml
 
     - name: Prepare optional DNS filtering before changing VPN routing
       ansible.builtin.include_tasks: tasks/install_dnsfilter.yml

@@ -15,7 +15,9 @@ def run_tests(root):
 
     role = Path("/opt/collections/ansible_collections/devsec/hardening/roles/ssh_hardening")
     hardening = yaml.safe_load((root / "server_hardening.yml").read_text())[0]
-    settings = next(item["vars"] for item in hardening["roles"] if item["role"].endswith("ssh_hardening"))
+    ssh_role = next(item for item in hardening["tasks"]
+                    if item.get("ansible.builtin.import_role", {}).get("name") == "devsec.hardening.ssh_hardening")
+    settings = ssh_role["vars"]
     Path("/run/sshd").mkdir(exist_ok=True)
     # The real role creates its empty revocation list before reloading sshd.
     Path("/etc/ssh/revoked_keys").touch(mode=0o644)
@@ -97,3 +99,6 @@ def run_tests(root):
                 server.wait(timeout=10)
             server.stderr.close()
         print("PASS: OpenSSH client executes commands, transfers with SFTP and rejects an incorrect host key")
+        (directory / "known_hosts").write_text("[127.0.0.1]:22222 " + (directory / "host.pub").read_text())
+        from test_native_ssh_socket import run_tests as socket_checks
+        socket_checks(root, directory, args, ssh_role)

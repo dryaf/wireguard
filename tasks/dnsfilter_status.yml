@@ -1,0 +1,64 @@
+---
+- name: Read the installed DNS policy
+  ansible.builtin.slurp:
+    src: /etc/wireguard-dnsfilter/config.yml
+  register: dnsfilter_status_file
+  no_log: true
+
+- name: Decode the installed policy
+  ansible.builtin.set_fact:
+    dnsfilter_status_policy: "{{ dnsfilter_status_file.content | b64decode | from_yaml | dnsfilter_validate_policy }}"
+  no_log: true
+
+- name: Read service state without changing it
+  ansible.builtin.service_facts:
+
+- name: Read the DNS filter's local health endpoint
+  ansible.builtin.uri:
+    url: http://127.0.0.1:18080/health
+    use_proxy: false
+    follow_redirects: none
+    timeout: 5
+    return_content: true
+  register: dnsfilter_status_health
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: Read the DNS filter's local counters
+  ansible.builtin.uri:
+    url: http://127.0.0.1:18080/metrics
+    use_proxy: false
+    follow_redirects: none
+    timeout: 5
+    return_content: true
+  register: dnsfilter_status_metrics
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: Inspect VPN DNS redirection without changing firewall rules
+  ansible.builtin.command:
+    argv: [iptables, -t, nat, -S, PREROUTING]
+  register: dnsfilter_status_routes
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: Report DNS filter status
+  ansible.builtin.debug:
+    msg:
+      service: "{{ ansible_facts.services.get('wireguard-dnsfilter.service', {'state': 'not installed'}) }}"
+      healthy: "{{ ansible_facts.services.get('wireguard-dnsfilter.service', {}).get('state') == 'running' and dnsfilter_status_health.status | default(-1) == 200 and dnsfilter_status_health.content | default('') | trim == 'OK' }}"
+      filter_flags:
+        ads: "{{ dnsfilter_status_policy.get('filter_ads', false) }}"
+        porn: "{{ dnsfilter_status_policy.get('filter_porn', false) }}"
+        malware: "{{ dnsfilter_status_policy.get('filter_malware', false) }}"
+      primary_resolver: "{{ 'resolver_anti_porn' if dnsfilter_status_policy.get('filter_porn', false) else ('resolver_anti_malware' if dnsfilter_status_policy.get('filter_malware', false) else 'resolver_unfiltered') }}"
+      counters: "{{ dnsfilter_status_metrics.json | default('unavailable') if dnsfilter_status_metrics.status | default(-1) == 200 else 'unavailable' }}"
+      vpn_dns_redirect_rules: "{{ dnsfilter_status_routes.stdout_lines | default([]) | select('search', 'wireguard-manager:wg0') | select('search', ':1053') | list if dnsfilter_status_routes.rc == 0 else ['unavailable'] }}"
+      notes:
+        - 'An empty redirect list means this output does not confirm that VPN clients use the filter.'
+        - 'Cloudflare adult filtering also blocks malware. AdGuard can also block unsafe domains; disabling one flag does not override another upstream policy.'
+        - 'Counters reset on restart. Cached blocks do not increment blocked_total again; NXDOMAIN is also classified as blocked by upstream dnsfilter.'
+        - 'Use make dnsfilter-monitor while testing from a connected client; look for blocked, client_ip, domain and resolver.'

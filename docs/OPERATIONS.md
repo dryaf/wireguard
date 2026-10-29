@@ -47,8 +47,10 @@ provider, then run:
 make trust-host
 ```
 
-Paste that independently obtained `SHA256:...` fingerprint when prompted. A mismatch
-leaves existing trust unchanged. Verified keys are saved in `.container/known_hosts`,
+Paste that independently obtained `SHA256:...` fingerprint or the complete ED25519
+`ssh-keygen -lf` output line when prompted. The fingerprint field is compared exactly;
+malformed or ambiguous input and mismatches leave existing trust unchanged.
+Verified keys are saved in `.container/known_hosts`,
 which is excluded from Git and container builds. Ordinary deployment commands mount
 this file read-only and require strict host-key checking. `make clean_known_hosts`
 explicitly removes the inventory servers from this project-specific file.
@@ -104,9 +106,26 @@ configuration file has not changed, and repairs a missing `wg0` interface.
 
 Firewall hooks use rules tagged `wireguard-manager:wg0`. Cleanup removes only those
 rules, including rules left by a failed or killed startup hook. Other firewall rules
-are preserved. Enforcing AppArmor profiles must permit WireGuard's netlink operations
-and the installed `/usr/local/lib/wireguard-manager/wireguard_firewall.py` hook; check
-this on the target OS during staging. The project does not change AppArmor policies.
+are preserved. When AppArmor is enabled and the distribution supplies `wg-quick` or
+`usr.bin.wg-quick`, setup adds a confined child profile for the firewall hook through
+the distribution's local customization file. It preserves existing local rules,
+compiles the policy before loading it, and checks the actual helper transition and
+firewall permissions without changing rules. A failed check restores the previous
+local policy. This happens before deploying DNS or changing VPN configuration. Disabled profiles
+are respected. Custom profiles without the expected local include require explicit
+integration. This follows the [AppArmor local override workflow](https://apparmor.dev/monitoring/denial_quick_guide/).
+
+If setup reports a WireGuard service failure, use the VPS provider console to run:
+
+```shell
+sudo journalctl -u wg-quick@wg0 -n 60 --no-pager
+sudo journalctl -k --grep='apparmor=.*DENIED' -n 30 --no-pager
+```
+
+An AppArmor denial for `wireguard_firewall.py` explains an exit status of 126 even
+when Unix file permissions are correct. Rerun the updated `DNSFILTER=yes make
+vpn-server-setup` to install the policy and retry setup. A receipt that has not yet
+been written while the detached setup job is running is normal.
 
 Debian security updates are matched by release codename and origin rather than a
 moving suite name. Ubuntu-only packages are installed only on Ubuntu. Fail2Ban uses
@@ -143,8 +162,13 @@ this DNS routing rule; enforce client/browser policy separately if those must be
 
 The default malware resolver is [Cloudflare's malware-only service](https://developers.cloudflare.com/1.1.1.1/setup/)
 at `1.1.1.2` over HTTPS. For explicit policy
-changes, the playbook accepts boolean `dnsfilter_block_malware` and `dnsfilter_block_porn`
-variables. For example, direct noninteractive execution also supports:
+changes, use `make dnsfilter-enable-malware`, `make dnsfilter-disable-malware`,
+`make dnsfilter-enable-porn`, `make dnsfilter-disable-porn`, `make dnsfilter-enable-ads`
+and `make dnsfilter-disable-ads`. The playbook also accepts boolean
+`dnsfilter_block_malware`, `dnsfilter_block_porn` and `dnsfilter_block_ads` variables
+as explicit setup overrides. Without overrides, later setup runs preserve the flags
+from the installed configuration. First installation defaults to malware on, porn and ads off.
+For example, direct noninteractive execution also supports:
 
 ```shell
 ./scripts/container playbook wireguard_server_setup.yml \
@@ -158,6 +182,42 @@ previous DNS policy too. Incomplete recovery retains the private `.deploy-*` dir
 under `/etc/wireguard-dnsfilter` and reports its path. Choosing `no` on a later setup
 uses the selected external resolver; it does not uninstall an existing filter service.
 Use `make vpn-monitor` to follow the service logs alongside WireGuard.
+
+`make dnsfilter-status` reads the saved policy, service state, local `/health` and
+`/metrics` endpoints, and managed port-53 redirect rules. It reports `ok` and makes
+no configuration changes. A running filter without VPN redirect rules does not mean
+VPN clients use that filter; this can happen after setup with `DNSFILTER=no`.
+An unhealthy service is reported as `healthy: false`; this diagnostic command's exit
+status is not a substitute for reading the health field.
+
+Category commands use the same deployment lock, candidate validation, UDP/TCP probe
+and rollback path as installation. They reuse the immutable image in the installed
+managed systemd unit, preserve the other configuration fields and service definition,
+and do not install packages or rebuild the server image. Enabling ads on an older
+configuration adds the AdGuard HTTPS resolver if absent. A semantic no-op retains
+the original configuration bytes and does not restart a healthy running service.
+After success, the command displays the current status. `--check` on the management
+playbook shows the existing configuration without applying a change.
+
+Cloudflare Family blocks adult content and malware together; AdGuard's default
+resolver also blocks trackers and phishing. Filter flags select these resolver
+policies and are not three independent domain lists. All three flags off selects
+only the unfiltered resolver. Changes restart DNS briefly and clear its cache and counters.
+
+`make dnsfilter-logs` reads the latest 100 journal entries; `make dnsfilter-monitor`
+follows them until Ctrl-C. These commands select the first inventory server and use
+`sudo -n` when the SSH administrator is not root. Journal selection includes both
+the systemd service and `CONTAINER_NAME=wireguard-dnsfilter`, because Podman's conmon
+may log from a separate scope. Historical container entries remain available after
+a managed restart, subject to the system journal's retention policy.
+No new logging endpoint or public metrics port is exposed.
+
+Upstream block entries contain the domain, VPN client IP, query type, transport,
+resolver and reason. Cache hits do not emit block entries or increment
+`blocked_total` again. NXDOMAIN is also counted/logged as blocked by this pinned
+upstream, including genuinely nonexistent domains. Use the harmless Cloudflare test
+domains and compare answers for policy verification. Logs contain browsing metadata;
+apply the VPS's journal access controls and retention policy accordingly.
 
 An atomic `/run/wireguard-dnsfilter-setup.lock` directory prevents overlapping DNS
 deployments until VPN setup also finishes. Successful completion or recovery removes
@@ -187,6 +247,42 @@ key-only SSH, Fail2Ban and the shared UFW policy via `server_hardening.yml`.
 ```shell
 make server-hardening
 ```
+
+The SSH role refreshes systemd's unit definitions when it switches from socket
+activation to a continuously running SSH service. This prevents a removed socket
+dependency from remaining in systemd's cache. After applying the SSH configuration,
+hardening closes its old control connection and verifies a fresh connection before
+continuing with Fail2Ban and firewall setup.
+
+#### SSH recovery after a failed socket migration
+
+If an earlier run failed with `Unit ssh.socket is masked` and new SSH connections
+are refused, open your VPS provider's web or serial console. Run these commands
+**as root on the VPS**:
+
+```bash
+install -d -o root -g root -m 0755 /run/sshd &&
+/usr/sbin/sshd -t &&
+systemctl daemon-reload &&
+systemctl enable --now ssh.service
+```
+
+The configuration check must succeed before the service starts. `daemon-reload`
+refreshes the dependency graph after the old socket links have been removed;
+see the [systemd documentation](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#daemon-reload).
+The intended state is `ssh.service` active and enabled, with `ssh.socket` masked.
+
+Then run **on your computer**, using this updated checkout:
+
+```bash
+make check-ssh &&
+make server-hardening &&
+make check-auto-upgrades
+```
+
+Keep the provider console open until the SSH check succeeds. If the recovery
+command fails, inspect `systemctl status ssh.service --no-pager` and
+`journalctl -u ssh.service -n 60 --no-pager` in that console.
 
 For additional Ansible options, use the same container launcher:
 

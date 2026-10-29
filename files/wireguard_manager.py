@@ -336,7 +336,7 @@ class WireGuardManager:
                 self.sync(require_running=True)
                 if policy is not None:
                     self.firewall.up(*policy)
-            except (OperationError, OSError):
+            except (OperationError, OSError) as failure:
                 if original is not None:
                     try:
                         stop_failed = False
@@ -353,8 +353,8 @@ class WireGuardManager:
                         if stop_failed:
                             raise OperationError("Could not confirm that the failed service was fully stopped")
                     except (OperationError, OSError) as error:
-                        raise OperationError("Configuration update and rollback failed; the previous file was saved in the staging directory") from error
-                    raise OperationError("Configuration update failed; the previous configuration was restored")
+                        raise OperationError(f"Configuration update and rollback failed; the previous file was saved in the staging directory. {failure}") from error
+                    raise OperationError(f"Configuration update failed; the previous configuration was restored. {failure}") from failure
                 if policy is not None:
                     self.firewall.down()
                 raise

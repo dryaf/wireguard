@@ -1,5 +1,6 @@
 """Real Netfilter and killed hook processes; service lifecycle is simulated here."""
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -60,7 +61,7 @@ sys.exit(result.returncode)
                 return result
 
         values = dict(wireguard_address="10.99.0.1/24", wireguard_port=51820, wireguard_mtu=1280,
-                      server_priv_key_final="TEST_ONLY", ansible_default_ipv4={"interface": "wan0"}, dns_server="1.1.1.1")
+                      server_priv_key_final="TEST_ONLY", ansible_facts={"default_ipv4": {"interface": "wan0"}}, dns_server="1.1.1.1")
         original = environment.get_template("wg0.conf.j2").render(**values).rstrip() + "\n"
         atomic_write(directory / "wg0.conf", original)
         stage = directory / "staged"
@@ -69,6 +70,15 @@ sys.exit(result.returncode)
         atomic_write(candidate, environment.get_template("wg0.conf.j2").render(**dict(values, dns_server="2.2.2.2")))
         manager = WireGuardManager(directory, Lifecycle(directory))
         run_command(["iptables", "-A", "FORWARD", "-i", "wan0", "-m", "comment", "--comment", "unrelated-release-rule", "-j", "ACCEPT"])
+        before_check = {tool: run_command([tool]) for tool in ("iptables-save", "ip6tables-save")}
+        assert firewall.check() is False
+        # Exercise the installed script's system-Python shebang and imports.
+        assert json.loads(run_command([HELPER, "check"])) == {"ok": True, "changed": False}
+        for tool, before in before_check.items():
+            # iptables-save has timestamp comments; compare only actual rules.
+            meaningful = lambda text: [line for line in text.splitlines() if not line.startswith("#")]
+            assert meaningful(run_command([tool])) == meaningful(before)
+        print("PASS: firewall permission preflight leaves existing rules unchanged")
         assert firewall.up("1.1.1.1", "wan0") is True
         assert firewall.up("1.1.1.1", "wan0") is False
         previous = firewall.owned_rules()

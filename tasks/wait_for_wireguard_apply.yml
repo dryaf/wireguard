@@ -12,10 +12,21 @@
       register: wireguard_reconnect
       ignore_errors: true
 
+    - name: Check whether the operation receipt is ready
+      ansible.builtin.stat:
+        path: "{{ wireguard_staging.path }}/result.json"
+        get_checksum: false
+        get_mime: false
+      when: wireguard_reconnect is succeeded
+      register: wireguard_receipt_stat
+      ignore_errors: true
+      ignore_unreachable: true
+      no_log: true
+
     - name: Read the completed operation receipt if available
       slurp:
         src: "{{ wireguard_staging.path }}/result.json"
-      when: wireguard_reconnect is succeeded
+      when: wireguard_receipt_stat.stat.exists | default(false)
       register: wireguard_receipt
       ignore_errors: true
       ignore_unreachable: true

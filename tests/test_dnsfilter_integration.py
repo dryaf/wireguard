@@ -2,6 +2,8 @@
 
 import contextlib
 import ipaddress
+import itertools
+import json
 from pathlib import Path
 import socket
 import socketserver
@@ -105,7 +107,9 @@ class Upstream:
         if kind == 2:
             answer = b"\x02ns\x07example\x04test\0"
         else:
-            blocked = (self.role == "malware" and name.startswith("malware.")) or (self.role == "family" and name.startswith("adult."))
+            blocked = ((self.role == "malware" and name.startswith("malware."))
+                       or (self.role == "family" and name.startswith(("adult.", "malware.")))
+                       or (self.role == "ads" and name.startswith("ads.")))
             answer = ipaddress.IPv4Address("0.0.0.0" if blocked else "192.0.2.10").packed
         return (data[:2] + struct.pack("!5H", 0x8180, 1, 1, 0, 0) + data[12:end + 4]
                 + b"\xc0\x0c" + struct.pack("!HHIH", kind, 1, 60, len(answer)) + answer)
@@ -115,6 +119,58 @@ class Upstream:
             server.shutdown()
             server.server_close()
         self.servers = []
+
+
+def check_policy_combinations():
+    with contextlib.ExitStack() as stack, tempfile.TemporaryDirectory() as temporary:
+        upstreams = {role: Upstream(role) for role in ('unfiltered', 'malware', 'family', 'ads')}
+        for server in upstreams.values():
+            stack.callback(server.close)
+        for ads, porn, malware in itertools.product((False, True), repeat=3):
+            config = yaml.safe_load(templates().get_template('dnsfilter.yml.j2').render(
+                wireguard_address='10.99.0.1/24', dnsfilter_block_ads=ads,
+                dnsfilter_block_porn=porn, dnsfilter_block_malware=malware))
+            for key, role in (('resolver_unfiltered', 'unfiltered'), ('resolver_anti_malware', 'malware'),
+                              ('resolver_anti_porn', 'family'), ('resolver_anti_ads', 'ads')):
+                config[key] = dict(name=role, protocol='udp', addr=f'127.0.0.1:{upstreams[role].port}')
+            path = Path(temporary) / 'config.yml'
+            path.write_text(yaml.safe_dump(config))
+            subprocess.run([BINARY, '-checkConfig', '-configFile', str(path)], check=True, capture_output=True)
+            with (Path(temporary) / 'log').open('w+') as log:
+                process = subprocess.Popen([BINARY, '-configFile', str(path)], stdout=log, stderr=log)
+                try:
+                    for _ in range(100):
+                        assert process.poll() is None, 'DNS filter exited during startup'
+                        try:
+                            with urllib.request.urlopen('http://127.0.0.1:18080/health', timeout=.2):
+                                break
+                        except OSError:
+                            time.sleep(.05)
+                    else:
+                        raise AssertionError('DNS filter did not start')
+                    expected = {'ads': ads, 'adult': porn, 'malware': malware or porn}
+                    for transport in ('udp', 'tcp'):
+                        for domain, blocked in expected.items():
+                            answer = query(domain + '.example.test', transport)
+                            assert answer == (0, ['0.0.0.0' if blocked else '192.0.2.10']), (config, transport, domain, answer)
+                    with urllib.request.urlopen('http://127.0.0.1:18080/metrics', timeout=2) as response:
+                        metrics = json.load(response)
+                    assert metrics == dict(requests_total=6, blocked_total=sum(expected.values()), errors_total=0, cache_hits=3), metrics
+                finally:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                log.seek(0)
+                blocked_lines = [line for line in log if 'INFO blocked ' in line]
+                for domain, blocked in expected.items():
+                    matches = [line for line in blocked_lines if f'domain={domain}.example.test.' in line]
+                    assert bool(matches) == blocked, (domain, blocked, matches)
+                    for line in matches:
+                        assert 'client_ip=127.0.0.1' in line and 'resolver=' in line and 'reason=0.0.0.0' in line, line
+                print(f'PASS: UDP/TCP policy ads={ads}, porn={porn}, malware={malware}; block logs and cached counters')
 
 
 def main():
@@ -171,5 +227,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+    check_policy_combinations()
     from test_dnsfilter_deployment import run_tests
     run_tests(BINARY)

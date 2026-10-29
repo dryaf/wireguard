@@ -70,6 +70,8 @@ class ReleaseTests(unittest.TestCase):
             delay = next(task for task in tasks if task["task"]["name"] == "Wait before checking again")
             self.assertTrue(delay["hosts"]["a_done"]["skipped"])
             self.assertGreaterEqual(delay["hosts"]["z_waiting"]["elapsed"], 5)
+            self.assertFalse(any(result.get("failed") for task in tasks for result in task["hosts"].values()),
+                             "A pending receipt is normal and must not be reported as a failed task")
 
     def test_ipv6_profile_and_server_template_have_no_injection_path(self):
         environment = Environment(loader=FileSystemLoader(ROOT / "templates"), undefined=StrictUndefined)
@@ -80,10 +82,16 @@ class ReleaseTests(unittest.TestCase):
             wireguard_port=51820, ansible_host="2001:db8::1",
         )
         self.assertIn("Endpoint = [2001:db8::1]:51820", config)
+        fallback = environment.get_template("client.conf.j2").render(
+            client_address="10.99.0.2/32", client_private_key={"stdout": "TEST_ONLY"},
+            server_public_key={"stdout": "TEST_ONLY"}, wireguard_gateway_ip="10.99.0.1",
+            wireguard_port=51820, ansible_facts={"default_ipv4": {"address": "192.0.2.1"}},
+        )
+        self.assertIn("Endpoint = 192.0.2.1:51820", fallback)
         variables = dict(wireguard_address="10.99.0.1/24", wireguard_port=51820, server_priv_key_final="TEST_ONLY",
-                         ansible_default_ipv4={"interface": "eth0"}, dns_server="1.1.1.1")
-        for key, value in (("dns_server", "1.1.1.1;id"), ("ansible_default_ipv4", {"interface": "eth0;id"}),
-                           ("ansible_default_ipv4", {"interface": "--help"})):
+                         ansible_facts={"default_ipv4": {"interface": "eth0"}}, dns_server="1.1.1.1")
+        for key, value in (("dns_server", "1.1.1.1;id"), ("ansible_facts", {"default_ipv4": {"interface": "eth0;id"}}),
+                           ("ansible_facts", {"default_ipv4": {"interface": "--help"}})):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 environment.get_template("wg0.conf.j2").render(**dict(variables, **{key: value}))
 

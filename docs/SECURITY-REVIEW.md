@@ -145,11 +145,43 @@ receive no deployment credentials. Deployment containers receive the dedicated
 SSH-agent socket, which is a sensitive capability even though private key files
 are not mounted.
 
-Validation completed for these changes: 86 regression tests, all 12 playbook syntax
+Earlier release validation covered 93 regression tests, all 12 playbook syntax
 checks, lock consistency and pip-audit; upstream OpenSSH unit tests; native SSH/SFTP
 and host-key rejection; Netfilter/UFW on IPv4 and IPv6, Fail2Ban and update-origin
 checks; real DNS UDP/TCP policy/outage checks and 13 Ansible deployment/recovery
 scenarios with simulated runtime management. The full native WireGuard
 integration test is blocked by this workstation's AppArmor restrictions; no host
-security policy was relaxed. A fresh VPS still needs the README's SSH reconnect,
-client handshake, DNS, public-IP and reboot checks before production use.
+security policy was relaxed.
+
+The current regression suite passes all 99 tests, including client/server template
+rendering without deprecated injected fact aliases and DNS policy changes through
+real Ansible with deprecation warnings enabled. DNS management checks additionally
+exercise all eight filter-flag combinations
+against the pinned binary over UDP and TCP, including block-log attribution and
+cache counters. The Ansible deployment/recovery suite now covers 23 scenarios,
+including category changes without image rebuilds, preserved settings, unchanged
+repeat commands, failed candidate validation, rollback and rollback failure,
+check mode, and read-only status for healthy, failed and missing installations.
+All 13 playbooks pass syntax checks. Live read-only status and journal commands
+were verified on the VPS; status reported `changed=0` and both DNS redirect rules.
+The default ad resolver is added only to configuration; enabling it remains an
+explicit operator choice. Upstream policy overlap and the limits of cached/NXDOMAIN
+block accounting are documented in the README and operations guide.
+
+The DNS-enabled setup was also completed on an Ubuntu 26.04 VPS after adding the
+confined AppArmor firewall helper. WireGuard and dnsfilter were active and enabled;
+the WireGuard and helper profiles were enforcing. Live checks verified UDP/TCP DNS
+redirect rules and IPv4/IPv6 private-port guards. DNS category queries through the
+running filter blocked the malware test domain and allowed the adult test domain.
+
+The SSH socket migration regression now runs the pinned role's actual tasks against
+real systemd and sshd. It reproduces the masked-socket failure, then verifies recovery,
+first-time migration, an unchanged repeat run and another service restart, each with
+a fresh key-only login. The playbook reloads unit definitions within the SSH role
+and checks a new connection after applying its SSH configuration. The full hardening
+run completed on the Ubuntu 26.04 VPS with zero failed or unreachable tasks. Subsequent
+checks verified effective SSH settings, the Fail2Ban SSH jail, UFW, VPN NAT/forwarding,
+DNS guards and UDP/TCP resolution, AppArmor enforcement and automatic security updates.
+
+Client handshake, client public-IP and reboot checks remain separate steps in the
+README; service startup and resolver checks do not replace those checks.

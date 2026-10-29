@@ -22,13 +22,32 @@
       until: apt_result is success
       retries: 5
       delay: 5
-      when: ansible_os_family == "Debian"
+      when: ansible_facts.os_family == "Debian"
 
   collections:
     - devsec.hardening
   roles:
     - role: devsec.hardening.os_hardening
-    - role: devsec.hardening.ssh_hardening
+
+  vars:
+    wireguard_port: 51820
+    ssh_port: "{{ ansible_port | default(22) }}"
+    sysctl_overwrite:
+      net.ipv4.ip_forward: 1
+      net.ipv6.conf.all.forwarding: 1
+
+  tasks:
+    - name: Harden SSH with current systemd unit dependencies
+      ansible.builtin.import_role:
+        name: devsec.hardening.ssh_hardening
+      # The pinned role removes ssh.service's socket dependency on disk. Its
+      # following service start must reload systemd's cached dependency graph.
+      # Scope the default to this role, including its legacy "systemd" alias.
+      module_defaults:
+        ansible.builtin.systemd:
+          daemon_reload: true
+        ansible.builtin.systemd_service:
+          daemon_reload: true
       vars:
         ssh_server_ports: ["{{ ansible_port | default(22) | string }}"]
         ssh_server_password_login: false
@@ -39,14 +58,21 @@
         ssh_client_alive_count: 5
         ssh_max_auth_retries: 3
 
-  vars:
-    wireguard_port: 51820
-    ssh_port: "{{ ansible_port | default(22) }}"
-    sysctl_overwrite:
-      net.ipv4.ip_forward: 1
-      net.ipv6.conf.all.forwarding: 1
+    - name: Verify a fresh SSH login after applying the hardening configuration
+      when: not ansible_check_mode
+      block:
+        - name: Apply pending SSH configuration changes
+          ansible.builtin.meta: flush_handlers
 
-  tasks:
+        - name: Close the previous SSH control connection
+          ansible.builtin.meta: reset_connection
+
+        - name: Verify the new SSH connection and administrator access
+          ansible.builtin.wait_for_connection:
+            timeout: 60
+            connect_timeout: 5
+            sleep: 2
+
     # --- CRITICAL FIX: Remove Conflicting Firewall Manager ---
     - name: Remove conflicting iptables-persistent packages
       package:

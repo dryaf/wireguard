@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -BES
 """Idempotent wg0 hooks; touch only rules carrying this project's ownership tag."""
 
 import argparse
@@ -31,6 +31,12 @@ def run_command(argv, stdin=None):
         raise OperationError(f"Unable to complete {argv[0]} operation") from error
     if result.returncode:
         # A rejected WireGuard configuration can contain private key material.
+        if argv[0] == "systemctl" and "wg-quick@wg0" in argv:
+            raise OperationError(
+                f"WireGuard service operation failed (exit {result.returncode}). "
+                "Inspect: sudo journalctl -u wg-quick@wg0 -n 60 --no-pager; "
+                "check the kernel journal for AppArmor DENIED messages."
+            )
         raise OperationError(f"{argv[0]} operation failed (exit {result.returncode})")
     return result.stdout
 
@@ -119,6 +125,16 @@ class WireGuardFirewall:
         with self.locked():
             return self.clear()
 
+    def check(self):
+        """Exercise hook permissions without adding or deleting firewall rules."""
+        with self.locked():
+            for ipv6 in (False, True):
+                self.owned_rules(ipv6=ipv6)
+                tables = ("filter",) if ipv6 else ("filter", "nat")
+                self.run(["ip6tables-restore" if ipv6 else "iptables-restore", "--test", "--wait", "10", "--noflush"],
+                         stdin="".join(f"*{table}\nCOMMIT\n" for table in tables))
+        return False
+
     def protect_dns(self):
         """Keep the unprivileged DNS port private, even without UFW enabled."""
         wanted = []
@@ -192,6 +208,7 @@ if __name__ == "__main__":
     up.add_argument("--wan", required=True)
     up.add_argument("--dns-port", type=int, default=53)
     commands.add_parser("down")
+    commands.add_parser("check")
     commands.add_parser("protect-dns")
     commands.add_parser("unprotect-dns")
     args = parser.parse_args()

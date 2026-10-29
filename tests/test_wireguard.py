@@ -88,7 +88,7 @@ class PeerPreservationTests(unittest.TestCase):
             "wireguard_address": "10.99.0.1/24",
             "wireguard_port": 51820,
             "server_priv_key_final": "DUMMY_PRIVATE_KEY",
-            "ansible_default_ipv4": {"interface": "eth0"},
+            "ansible_facts": {"default_ipv4": {"interface": "eth0"}},
             "dns_server": "1.1.1.1",
         }
 
@@ -160,7 +160,7 @@ class ClientRoutingTests(unittest.TestCase):
             client_address="10.99.0.2/32", client_private_key={"stdout": "DUMMY"},
             server_public_key={"stdout": "DUMMY"}, wireguard_gateway_ip="10.99.0.1",
             wireguard_port=51820, ansible_host="vpn.example.com",
-            ansible_default_ipv4={"address": "192.0.2.1"},
+            ansible_facts={"default_ipv4": {"address": "192.0.2.1"}},
         )
         allowed = next(line.split("=", 1)[1] for line in config.splitlines() if line.startswith("AllowedIPs"))
         routes = [ipaddress.ip_network(value.strip()) for value in allowed.split(",")]

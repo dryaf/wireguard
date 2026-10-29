@@ -4,6 +4,7 @@
     name: [podman, ca-certificates]
     state: present
     lock_timeout: 300
+  when: not dnsfilter_update_only | default(false)
 
 - name: Create a private DNS filter deployment directory
   ansible.builtin.file:
@@ -12,6 +13,7 @@
     owner: root
     group: root
     mode: '0700'
+  when: not dnsfilter_update_only | default(false)
 
 - name: Create private DNS filter staging directory
   ansible.builtin.tempfile:
@@ -74,6 +76,26 @@
           - "'Managed by the WireGuard project' in (dnsfilter_previous_unit.content | b64decode)"
       when: dnsfilter_previous_files.results[1].stat.exists
 
+    - name: Require an existing managed deployment for category changes
+      ansible.builtin.assert:
+        that:
+          - dnsfilter_previous_files.results[0].stat.exists
+          - dnsfilter_previous_files.results[1].stat.exists
+        fail_msg: 'Install DNS filtering first: DNSFILTER=yes make vpn-server-setup'
+      when: dnsfilter_update_only | default(false)
+
+    - name: Read the saved policy under the deployment lock
+      ansible.builtin.slurp:
+        src: /etc/wireguard-dnsfilter/config.yml
+      register: dnsfilter_previous_config
+      when: dnsfilter_previous_files.results[0].stat.exists
+      no_log: true
+
+    - name: Preserve previously selected filter flags on later setup runs
+      ansible.builtin.set_fact:
+        dnsfilter_saved_policy: "{{ dnsfilter_previous_config.content | b64decode | from_yaml | dnsfilter_validate_policy if dnsfilter_previous_files.results[0].stat.exists else {} }}"
+      no_log: true
+
     - name: Read previous service state
       ansible.builtin.service_facts:
 
@@ -111,12 +133,14 @@
         path: "{{ dnsfilter_stage.path }}/build"
         state: directory
         mode: '0700'
+      when: not dnsfilter_update_only | default(false)
 
     - name: Stage the pinned container build recipe
       ansible.builtin.copy:
         src: Dockerfile
         dest: "{{ dnsfilter_stage.path }}/build/Containerfile"
         mode: '0600'
+      when: not dnsfilter_update_only | default(false)
 
     - name: Build the pinned DNS filter entirely inside containers
       ansible.builtin.command:
@@ -129,15 +153,23 @@
           - "--file={{ dnsfilter_stage.path }}/build/Containerfile"
           - "{{ dnsfilter_stage.path }}/build"
       changed_when: false
+      when: not dnsfilter_update_only | default(false)
 
     - name: Read the exact built image ID
       ansible.builtin.slurp:
         src: "{{ dnsfilter_stage.path }}/image-id"
       register: dnsfilter_built_image
+      when: not dnsfilter_update_only | default(false)
 
     - name: Record the immutable DNS filter image
       ansible.builtin.set_fact:
         dnsfilter_image_id: "{{ dnsfilter_built_image.content | b64decode | trim }}"
+      when: not dnsfilter_update_only | default(false)
+
+    - name: Reuse the installed immutable image for a policy-only change
+      ansible.builtin.set_fact:
+        dnsfilter_image_id: "{{ (dnsfilter_previous_unit.content | b64decode | regex_findall('(?m)^ExecStart=/usr/bin/podman run .* (sha256:[a-f0-9]{64})$') | first) | default('') }}"
+      when: dnsfilter_update_only | default(false)
 
     - name: Validate the immutable image identifier
       ansible.builtin.assert:
@@ -149,6 +181,20 @@
         src: templates/dnsfilter.yml.j2
         dest: "{{ dnsfilter_stage.path }}/config.yml"
         mode: '0444'
+      when: not dnsfilter_update_only | default(false)
+
+    - name: Prepare the requested flag without changing other DNS settings
+      ansible.builtin.set_fact:
+        dnsfilter_candidate_policy: "{{ dnsfilter_saved_policy | dnsfilter_update_policy(dnsfilter_category, dnsfilter_value) }}"
+      when: dnsfilter_update_only | default(false)
+      no_log: true
+
+    - name: Stage only the requested flag while preserving the remaining DNS settings
+      ansible.builtin.copy:
+        content: "{{ dnsfilter_previous_config.content | b64decode if dnsfilter_candidate_policy == dnsfilter_saved_policy else dnsfilter_candidate_policy | to_nice_yaml }}"
+        dest: "{{ dnsfilter_stage.path }}/config.yml"
+        mode: '0444'
+      when: dnsfilter_update_only | default(false)
 
     - name: Validate the policy in an isolated non-root container
       ansible.builtin.command:
@@ -176,6 +222,14 @@
         src: templates/wireguard-dnsfilter.service.j2
         dest: "{{ dnsfilter_stage.path }}/unit"
         mode: '0600'
+      when: not dnsfilter_update_only | default(false)
+
+    - name: Preserve the installed unit during a policy-only change
+      ansible.builtin.copy:
+        content: "{{ dnsfilter_previous_unit.content | b64decode }}"
+        dest: "{{ dnsfilter_stage.path }}/unit"
+        mode: '0600'
+      when: dnsfilter_update_only | default(false)
 
     - name: Preserve existing configuration and service definition
       ansible.builtin.copy:

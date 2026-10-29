@@ -2,7 +2,7 @@
 
 Follow these steps to install **WireGuard, a DNS malware filter, a firewall,
 SSH hardening, Fail2Ban and automatic security updates** on a fresh VPS.
-Adult sites remain allowed. No setup can promise perfect security; see the
+Adult sites and ads remain allowed by default. No setup can promise perfect security; see the
 [security review](docs/SECURITY-REVIEW.md) for remaining findings and test limits.
 
 You need:
@@ -104,11 +104,19 @@ Replace `YOUR_VPS_IP` with the real public IPv4 address. Pressing Enter accepts 
 default username and port. The first container build takes several minutes.
 Settings are saved in `inventory.ini`; an existing inventory will not be overwritten.
 
+Your local inventory, `clients/` exports and `.container/` state are excluded from
+Git and container builds. Keep extracted VPN profiles, QR images and saved logs in
+`clients/` or `private/`. If you choose another location inside this project, exclude
+it in both `.gitignore` and `.dockerignore` before saving private data there. Ignore
+rules do not remove data already committed or detect secrets pasted into source files.
+
 ```bash
 make trust-host
 ```
 
 Paste the `SHA256:...` fingerprint you obtained **from the provider console**.
+You can also paste the complete `256 SHA256:... root@server (ED25519)` line;
+both formats are accepted and the fingerprint must match exactly.
 If it differs, stop and investigate. Do not simply accept the fingerprint shown by
 the network connection you are trying to verify.
 
@@ -136,13 +144,18 @@ make check-auto-upgrades
 
 **Stop if a command fails.** Read the error and retry that step after resolving it.
 Do not continue through a failed installation.
+For `Unit ssh.socket is masked` from an earlier version, follow the
+[SSH recovery steps](docs/OPERATIONS.md#ssh-recovery-after-a-failed-socket-migration)
+in your VPS provider's console before retrying hardening.
 
 This configures:
 
 - **UFW firewall:** SSH and WireGuard are allowed; private service ports are protected.
 - **WireGuard:** VPN gateway `10.99.0.1/24`, UDP port `51820`.
+- **AppArmor compatibility:** where a distribution WireGuard profile is enabled,
+  setup installs and checks a confined firewall hook before starting the VPN.
 - **dnsfilter:** malware blocking through Cloudflare's malware resolver. Adult and
-  advertisement filtering are off. Ordinary DNS queries from VPN clients go through
+  advertisement filtering are off on first installation. Ordinary DNS queries from VPN clients go through
   the filter, including requests addressed to another resolver such as `8.8.8.8`.
 - **SSH hardening:** key-only access, restricted to your inventory user. In this guide,
   `root` remains accessible by key. Password login, compression and agent forwarding are off.
@@ -233,10 +246,63 @@ Run these **on your computer, in the project directory**:
 | Revoke a device | `CLIENT_NAME=phone make vpn-client-remove` |
 | VPN status | `make vpn-server-status` |
 | Follow logs; exit with Ctrl+C | `make vpn-monitor` |
+| DNS filter health, settings and counters | `make dnsfilter-status` |
+| Latest 100 DNS filter log entries | `make dnsfilter-logs` |
+| Follow DNS filter logs; exit with Ctrl+C | `make dnsfilter-monitor` |
 | Troubleshoot | `make vpn-debug` |
 | Check automatic updates | `make check-auto-upgrades` |
 | Audit Python dependencies | `make audit` |
 | Scan Python locks and built containers with OSV | `make osv-scan` |
+
+### Change DNS filtering
+
+Run these **on your computer, in the project directory**, after installing with
+`DNSFILTER=yes`. Each change applies to **all VPN clients**; existing profiles keep working.
+
+| Filter | Enable blocking | Disable blocking |
+| --- | --- | --- |
+| Ads and trackers | `make dnsfilter-enable-ads` | `make dnsfilter-disable-ads` |
+| Adult content | `make dnsfilter-enable-porn` | `make dnsfilter-disable-porn` |
+| Malware | `make dnsfilter-enable-malware` | `make dnsfilter-disable-malware` |
+
+Use `make dnsfilter-status` to see the selected flags, service health, counters and
+VPN DNS redirect rules. Changes are validated and DNS is checked over UDP and TCP;
+a failed change restores the previous configuration. A changed policy briefly
+restarts DNS. Repeating an already-applied setting does not restart it. Your filter
+choices survive reboot and later `DNSFILTER=yes make vpn-server-setup` runs.
+
+The upstream policies overlap: [Cloudflare's adult-content resolver](https://developers.cloudflare.com/1.1.1.1/setup/)
+also blocks malware, and [AdGuard's default resolver](https://adguard-dns.io/kb/general/dns-providers/#default)
+blocks ads, trackers and phishing. Disabling the malware flag does not override
+protection provided by another enabled resolver. All three flags must be off to
+select only the unfiltered resolver.
+
+### See whether a client was filtered
+
+On your computer, leave this running:
+
+```bash
+make dnsfilter-monitor
+```
+
+With the VPN connected on your phone, open Cloudflare's harmless test address
+`https://malware.testcategory.com/`. With malware filtering enabled, the page should
+not load and a fresh DNS lookup should produce a log entry containing `INFO blocked`,
+`domain=malware.testcategory.com.`, `client_ip=10.99.0.x` and `reason=0.0.0.0`.
+Use `make vpn-client-list` to match that VPN address to a device. For exact UDP/TCP
+checks, use the `dig` commands in step 6.
+
+`make dnsfilter-logs` shows recent history without following it. These log commands
+read the first server in your inventory; status and category changes cover all servers.
+Logs contain queried domains and client IPs, so keep them private.
+
+Cached answers can be blocked without a new block log or a new `blocked_total` count.
+`requests_total` and `cache_hits` help confirm activity; all counters reset when DNS
+restarts. The upstream service also labels NXDOMAIN responses as `blocked`, so a
+nonexistent domain alone does not prove a policy block. Browser/device encrypted DNS
+can bypass this filter; use the client settings described in step 6.
+
+### Dependency maintenance
 
 `make osv-scan` saves JSON reports and logs under `.container/osv/run.*/`. A failing
 exit status is expected while vulnerabilities remain. These reports contain no

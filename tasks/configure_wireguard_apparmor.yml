@@ -1,0 +1,18 @@
+---
+- name: Find distribution WireGuard AppArmor profiles
+  ansible.builtin.stat:
+    path: "/etc/apparmor.d/{{ item }}"
+  loop: [wg-quick, usr.bin.wg-quick]
+  register: wireguard_apparmor_profiles
+  when: ansible_facts.get('apparmor', {}).get('status') == 'enabled'
+
+- name: Configure the firewall hook in each installed WireGuard profile
+  ansible.builtin.include_tasks: configure_wireguard_apparmor_profile.yml
+  loop: "{{ wireguard_apparmor_profiles.results | default([]) }}"
+  loop_control:
+    loop_var: wireguard_apparmor_profile
+    label: "{{ wireguard_apparmor_profile.item }}"
+  vars:
+    wireguard_apparmor_path: "{{ wireguard_apparmor_profile.stat.path }}"
+    wireguard_apparmor_local: "{{ wireguard_apparmor_path | dirname }}/local/{{ wireguard_apparmor_path | basename }}"
+  when: wireguard_apparmor_profile.stat.exists | default(false)

@@ -17,6 +17,7 @@
     that:
       - dnsfilter_block_malware | default(true) is boolean
       - dnsfilter_block_porn | default(false) is boolean
+      - dnsfilter_block_ads | default(false) is boolean
       - (wireguard_port | wireguard_number(1, 65535)) not in [1053, 18080]
       - (ansible_port | default(22) | wireguard_number(1, 65535)) not in [1053, 18080]
       - ansible_facts.architecture in ['x86_64', 'aarch64']

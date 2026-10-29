@@ -25,7 +25,13 @@ PLAYBOOKS = {
     "server-hardening": "server_hardening.yml",
     "enable-auto-upgrades": "server_toggle_autoupgrades.yml",
     "disable-auto-upgrades": "server_toggle_autoupgrades.yml",
+    "dnsfilter-status": "wireguard_dnsfilter.yml",
 }
+DNSFILTER_CHANGES = {
+    f"dnsfilter-{action}-{category}": {"dnsfilter_category": category, "dnsfilter_value": action == "enable"}
+    for category in ("ads", "porn", "malware") for action in ("enable", "disable")
+}
+PLAYBOOKS.update({command: "wireguard_dnsfilter.yml" for command in DNSFILTER_CHANGES})
 
 
 def run(*args, **kwargs):
@@ -39,7 +45,7 @@ def prompt(label, variable=None, default=""):
 
 
 def ask_dnsfilter():
-    label = "Use dnsfilter for all VPN clients (block malware; allow adult sites)? [y/N]: "
+    label = "Use dnsfilter for all VPN clients (keep saved policy; first install blocks malware only)? [y/N]: "
     while True:
         answer = prompt(label, "DNSFILTER", "no").strip().lower()
         if answer in {"y", "yes"}:
@@ -109,6 +115,24 @@ def known_host_name(host, port):
     return host if port == 22 else f"[{host}]:{port}"
 
 
+def fingerprint_from_console(value):
+    """Accept a SHA-256 token or one ED25519 ssh-keygen fingerprint line."""
+    value = value.strip()
+    fields = value.split()
+    fingerprint = ""
+    if "\n" not in value and "\r" not in value and value.count("SHA256:") == 1:
+        if len(fields) == 1:
+            fingerprint = fields[0]
+        elif len(fields) >= 3 and fields[0] == "256" and fields[-1] == "(ED25519)":
+            # Only the fingerprint field carries trust. Never search the comment
+            # for a matching value or accept several pasted fingerprint records.
+            fingerprint = fields[1]
+    if not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", fingerprint):
+        raise ValueError("Invalid fingerprint format: paste the SHA256:... value or one full ED25519 "
+                         "fingerprint line from the server console; known_hosts was not changed")
+    return fingerprint
+
+
 def update_known_hosts(trust):
     # ssh-keygen replaces files by renaming. Work on a temporary copy because
     # the persistent known_hosts file is an individual bind mount.
@@ -124,9 +148,10 @@ def update_known_hosts(trust):
                     raise ValueError(f"No ED25519 host key received from {name}")
                 candidate = Path(temporary) / "candidate"
                 candidate.write_text(keys)
-                fingerprints = run("ssh-keygen", "-lf", str(candidate), text=True, stdout=subprocess.PIPE).stdout
+                fingerprints = run("ssh-keygen", "-E", "sha256", "-lf", str(candidate), text=True, stdout=subprocess.PIPE).stdout
                 print(f"{name} ({host}:{port}):\n{fingerprints}", end="")
-                expected = input("Paste the SHA256 fingerprint obtained from the server console/provider: ").strip()
+                expected = fingerprint_from_console(input(
+                    "Paste the fingerprint from the server console/provider (SHA256:... or full ED25519 line): "))
                 actual = {line.split()[1] for line in fingerprints.splitlines()}
                 if actual != {expected}:
                     raise ValueError("Fingerprint mismatch; known_hosts was not changed")
@@ -137,18 +162,28 @@ def update_known_hosts(trust):
         KNOWN_HOSTS.write_bytes(destination.read_bytes())
 
 
-def monitor():
+def monitor(dnsfilter_only=False, follow=True):
     name, host, port, variables = servers()[0]
     user = str(variables.get("ansible_user", ""))
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", user):
         raise ValueError(f"Set a valid ansible_user for {name}")
-    print(f"Monitoring {name} ({host}:{port})")
-    args = ["ssh", "-o", "Compression=no", "-o", "ForwardAgent=no", "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={KNOWN_HOSTS}",
+    print(f"{'Following logs for' if follow else 'Recent logs for'} {name} ({host}:{port})", flush=True)
+    args = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "Compression=no", "-o", "ForwardAgent=no", "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={KNOWN_HOSTS}",
             "-p", str(port), "-l", user]
     if sys.stdin.isatty():
         args.append("-t")
     args.extend(shlex.split(str(variables.get("ansible_ssh_common_args", ""))))
-    args.extend([host, "journalctl -u wireguard-dnsfilter -u dns-filter -u wg-quick@wg0 -f -n 20"])
+    journal = ["journalctl", "--no-pager", "--output=short-iso", "--lines=100"]
+    if follow:
+        journal.append("--follow")
+    # Podman's conmon may use a separate systemd scope. Include its journal
+    # records explicitly, retaining logs from containers removed after restart.
+    journal.extend(["_SYSTEMD_UNIT=wireguard-dnsfilter.service", "+", "CONTAINER_NAME=wireguard-dnsfilter"])
+    if not dnsfilter_only:
+        journal.extend(["+", "_SYSTEMD_UNIT=wg-quick@wg0.service"])
+    if user != "root":
+        journal[:0] = ["sudo", "-n", "--"]
+    args.extend([host, shlex.join(journal)])
     os.execvp(args[0], args)
 
 
@@ -178,6 +213,8 @@ def main(command, extra):
             args.extend(["--extra-vars", json.dumps(settings)])
         if command in {"enable-auto-upgrades", "disable-auto-upgrades"}:
             args.extend(["--extra-vars", json.dumps({"enabled": "yes" if command == "enable-auto-upgrades" else "no"})])
+        if command in DNSFILTER_CHANGES:
+            args.extend(["--extra-vars", json.dumps({"dnsfilter_action": "update", **DNSFILTER_CHANGES[command]})])
         run(*args, *extra)
     elif command == "playbook":
         if not extra:
@@ -206,6 +243,8 @@ def main(command, extra):
         update_known_hosts(trust=command == "trust-host")
     elif command == "vpn-monitor":
         monitor()
+    elif command in {"dnsfilter-logs", "dnsfilter-monitor"}:
+        monitor(dnsfilter_only=True, follow=command == "dnsfilter-monitor")
     else:
         raise ValueError(f"Unknown command: {command}")
 

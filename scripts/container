@@ -43,7 +43,7 @@ case "$operation" in
     init) ;;
     trust-host) needs_inventory=true; write_hosts=true; network=default ;;
     clean_known_hosts) needs_inventory=true; write_hosts=true ;;
-    check-ssh|vpn-server-setup|vpn-firewall-setup|vpn-server-status|vpn-client-add|vpn-client-remove|vpn-client-qrcode|vpn-client-list|vpn-debug|vpn-monitor|check-auto-upgrades|enable-auto-upgrades|disable-auto-upgrades|server-hardening|playbook)
+    check-ssh|vpn-server-setup|vpn-firewall-setup|vpn-server-status|vpn-client-add|vpn-client-remove|vpn-client-qrcode|vpn-client-list|vpn-debug|vpn-monitor|check-auto-upgrades|enable-auto-upgrades|disable-auto-upgrades|server-hardening|playbook|dnsfilter-status|dnsfilter-logs|dnsfilter-monitor|dnsfilter-enable-ads|dnsfilter-disable-ads|dnsfilter-enable-porn|dnsfilter-disable-porn|dnsfilter-enable-malware|dnsfilter-disable-malware)
         needs_inventory=true; needs_agent=true; network=default ;;
     *) fail "Unknown container command: $operation" ;;
 esac
