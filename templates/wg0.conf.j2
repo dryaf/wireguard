@@ -1,20 +1,11 @@
 [Interface]
-Address = {{ wireguard_address }}
-ListenPort = {{ wireguard_port }}
+Address = {{ wireguard_address | wireguard_address }}
+ListenPort = {{ wireguard_port | wireguard_number(1, 65535) }}
 PrivateKey = {{ server_priv_key_final }}
-MTU = {{ wireguard_mtu | default(1280) }}
+MTU = {{ wireguard_mtu | default(1280) | wireguard_number(1280, 65535) }}
 
-# Ensure IP forwarding is enabled when interface comes up
-PostUp = sysctl -w net.ipv4.ip_forward=1
-PostUp = sysctl -w net.ipv6.conf.all.forwarding=1
+# Owned rules can be cleaned independently of the interface after a failed start.
+PostUp = /usr/local/lib/wireguard-manager/wireguard_firewall.py up --dns {{ ((wireguard_address | wireguard_gateway) if dnsfilter_enabled | default(false) else dns_server) | wireguard_ipv4 }} --wan {{ ansible_default_ipv4.interface | wireguard_interface }}{{ ' --dns-port 1053' if dnsfilter_enabled | default(false) else '' }}
+PostDown = /usr/local/lib/wireguard-manager/wireguard_firewall.py down
 
-# Masquerade outgoing traffic on the default WAN interface
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o {{ ansible_default_ipv4.interface }} -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o {{ ansible_default_ipv4.interface }} -j MASQUERADE
-
-# Redirect DNS traffic (UDP/TCP 53) from VPN clients to the local DNS filter
-# This forces clients to use the specified DNS server (dnsfilter) even if they try to bypass it.
-PostUp = iptables -t nat -A PREROUTING -i wg0 -p udp --dport 53 -j DNAT --to {{ dns_server }}:53
-PostUp = iptables -t nat -A PREROUTING -i wg0 -p tcp --dport 53 -j DNAT --to {{ dns_server }}:53
-PostDown = iptables -t nat -D PREROUTING -i wg0 -p udp --dport 53 -j DNAT --to {{ dns_server }}:53
-PostDown = iptables -t nat -D PREROUTING -i wg0 -p tcp --dport 53 -j DNAT --to {{ dns_server }}:53
+{{ wireguard_existing_peers | default('') }}

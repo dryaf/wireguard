@@ -1,0 +1,90 @@
+---
+- name: Check firewall inputs and support for first-match block insertion
+  assert:
+    that:
+      - ansible_version.full is version('2.14', '>=')
+      - (ssh_port | wireguard_number(1, 65535)) > 0
+      - (wireguard_port | wireguard_number(1, 65535)) > 0
+    fail_msg: "Firewall configuration requires ansible-core >= 2.14 and valid SSH/WireGuard ports."
+
+- name: Enable IPv6 firewalling and VPN forwarding
+  lineinfile:
+    path: /etc/default/ufw
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  loop:
+    - {regexp: '^IPV6=', line: 'IPV6=yes'}
+    - {regexp: '^DEFAULT_FORWARD_POLICY=', line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'}
+
+- name: Allow SSH and WireGuard connections
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+  loop:
+    - {port: "{{ ssh_port }}", proto: tcp}
+    - {port: "{{ wireguard_port }}", proto: udp}
+
+- name: Allow VPN and loopback access to local services
+  community.general.ufw:
+    rule: allow
+    direction: in
+    interface: "{{ item }}"
+  loop:
+    - wg0
+    - lo
+
+- name: Protect private services before existing UFW allow rules
+  vars:
+    wireguard_ufw_files:
+      - {path: /etc/ufw/before.rules, chain: ufw-before-input, validator: iptables-restore}
+      - {path: /etc/ufw/before6.rules, chain: ufw6-before-input, validator: ip6tables-restore}
+  block:
+    - name: Read UFW rule files before inserting the service guard
+      slurp:
+        src: "{{ item.path }}"
+      loop: "{{ wireguard_ufw_files }}"
+      register: wireguard_ufw_existing
+      no_log: true
+
+    - name: Require an existing input chain as the insertion point
+      assert:
+        that:
+          - (item.content | b64decode) is search('(?m)^-A ' ~ item.item.chain ~ ' ')
+        fail_msg: "The UFW before-rules file has no input rules; refusing to append a guard outside its filter table."
+      loop: "{{ wireguard_ufw_existing.results }}"
+      no_log: true
+
+    - name: Insert IPv4 and IPv6 service guards before the first input rule
+      blockinfile:
+        path: "{{ item.path }}"
+        marker: "# {mark} ANSIBLE WIREGUARD PRIVATE SERVICES"
+        insertbefore: "(?m)^-A {{ item.chain }} "
+        block: "{{ lookup('template', 'templates/ufw-private-services.rules.j2') }}"
+        validate: "{{ item.validator }} --test --noflush %s"
+      loop: "{{ wireguard_ufw_files }}"
+
+- name: Deny other incoming traffic by default
+  community.general.ufw:
+    default: deny
+    direction: incoming
+
+- name: Enable UFW
+  community.general.ufw:
+    state: enabled
+
+- name: Reconcile running firewall with the protected on-disk rules
+  community.general.ufw:
+    state: reloaded
+
+- name: Check for the optional DNS filter installation
+  ansible.builtin.stat:
+    path: /etc/wireguard-dnsfilter/config.yml
+  register: wireguard_dnsfilter_config
+
+- name: Restore private DNS port protection after a UFW reload
+  ansible.builtin.command:
+    argv: [/usr/local/lib/wireguard-manager/wireguard_firewall.py, protect-dns]
+  register: wireguard_dnsfilter_guard
+  changed_when: (wireguard_dnsfilter_guard.stdout | from_json).changed
+  when: wireguard_dnsfilter_config.stat.exists

@@ -4,6 +4,12 @@
   vars:
     enabled: "yes" # Default to enabled
   tasks:
+    - name: Require an explicit auto-update state
+      ansible.builtin.assert:
+        that:
+          - enabled in ['yes', 'no']
+        fail_msg: 'Set enabled to the string yes or no.'
+
     - name: Configure periodic updates
       copy:
         dest: /etc/apt/apt.conf.d/20auto-upgrades

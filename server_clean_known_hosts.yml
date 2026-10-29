@@ -1,9 +1,7 @@
-- hosts: servers
-  gather_facts: no
+---
+- hosts: localhost
+  gather_facts: false
   tasks:
-    - name: Remove servers from known_hosts
-      local_action:
-        module: command
-        args:
-          cmd: ssh-keygen -R {{ inventory_hostname }}
-      ignore_errors: yes
+    - name: Require the dedicated trust-file workflow
+      ansible.builtin.fail:
+        msg: 'Use make clean_known_hosts. It removes actual inventory endpoints and SSH ports from the writable project trust file.'

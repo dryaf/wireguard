@@ -1,0 +1,5 @@
+# Editable direct controller pins. Regenerate locks with make deps-lock.
+ansible-core==2.21.5
+Jinja2==3.1.6
+PyYAML==6.0.3
+pip==26.2.2

@@ -1,5 +1,9 @@
 inventory.ini
 *.zip
+/clients/
+/.container/
+/locks/*.tmp
+__pycache__/
 .prompt
 _prompt.txt
 _prompt_response.txt

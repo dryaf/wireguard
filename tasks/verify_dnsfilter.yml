@@ -1,0 +1,37 @@
+---
+- name: Wait for this service's container receipt
+  ansible.builtin.wait_for:
+    path: /run/wireguard-dnsfilter/container-id
+    timeout: 30
+
+- name: Read this service's container identity
+  ansible.builtin.slurp:
+    src: /run/wireguard-dnsfilter/container-id
+  register: dnsfilter_container_receipt
+
+- name: Record and validate this service's container identity
+  ansible.builtin.set_fact:
+    dnsfilter_container_id: "{{ dnsfilter_container_receipt.content | b64decode | trim }}"
+
+- name: Require an exact container ID
+  ansible.builtin.assert:
+    that:
+      - dnsfilter_container_id is match('^[a-f0-9]{64}$')
+
+- name: Probe DNS over both UDP and TCP from the running container
+  ansible.builtin.command:
+    argv: [podman, exec, "{{ dnsfilter_container_id }}", /dns-filter, -checkDNS, '127.0.0.1:1053']
+  register: dnsfilter_probe
+  until: dnsfilter_probe.rc == 0
+  retries: 5
+  delay: 2
+  changed_when: false
+
+- name: Require the DNS service to remain running
+  ansible.builtin.systemd_service:
+    name: wireguard-dnsfilter
+  register: dnsfilter_service_status
+  failed_when: >-
+    dnsfilter_service_status.status.ActiveState | default('') != 'active'
+    or dnsfilter_service_status.status.SubState | default('') != 'running'
+  changed_when: false

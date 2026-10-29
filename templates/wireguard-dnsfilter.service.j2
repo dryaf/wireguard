@@ -1,0 +1,25 @@
+# Managed by the WireGuard project
+[Unit]
+Description=DNS filtering for WireGuard clients
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+RuntimeDirectory=wireguard-dnsfilter
+RuntimeDirectoryMode=0700
+ExecStartPre=/usr/local/lib/wireguard-manager/wireguard_firewall.py protect-dns
+ExecStartPre=-/usr/bin/podman rm --force --ignore --cidfile=/run/wireguard-dnsfilter/container-id
+ExecStartPre=/usr/bin/rm -f /run/wireguard-dnsfilter/container-id
+ExecStart=/usr/bin/podman run --rm --name wireguard-dnsfilter --label=io.dryaf.wireguard.dnsfilter=managed --cidfile=/run/wireguard-dnsfilter/container-id --pull=never --network=host --read-only --user=65532:65532 --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=128 --memory=256m --log-driver=journald --mount=type=bind,src=/etc/wireguard-dnsfilter/config.yml,dst=/etc/dnsfilter.yml,readonly {{ dnsfilter_image_id }}
+ExecStop=-/usr/bin/podman stop --ignore --time=10 --cidfile=/run/wireguard-dnsfilter/container-id
+ExecStopPost=-/usr/bin/podman rm --force --ignore --cidfile=/run/wireguard-dnsfilter/container-id
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target

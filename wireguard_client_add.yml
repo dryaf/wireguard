@@ -3,130 +3,97 @@
   become: yes
   gather_facts: yes
   vars:
-    wireguard_port: 51820
     wireguard_mtu: 1280
     client_name: "{{ lookup('env', 'CLIENT_NAME') }}"
+    wireguard_allow_legacy_names: true
   tasks:
-    - name: Validate client_name variable
-      assert:
+    - name: Validate local export destination before changing the server
+      ansible.builtin.assert:
         that:
-          - client_name is defined
-          - client_name != ''
-        fail_msg: "The 'client_name' variable must be set. Usage: make vpn-client-add"
+          - (inventory_hostname | wireguard_export_host) == inventory_hostname
 
-    # --- 1. Network & Config Discovery ---
-    - name: Get WireGuard interface config
-      command: wg show wg0
-      register: wg_show
-      changed_when: false
-      failed_when: false
+    - name: Validate client name
+      import_tasks: tasks/validate_client_name.yml
 
-    - name: Fail if WireGuard is not running
-      fail:
-        msg: "WireGuard (wg0) is not running. Please run 'make vpn-server-setup' first."
-      when: wg_show.rc != 0
+    - name: Install transaction helper
+      import_tasks: tasks/install_wireguard_manager.yml
 
-    - name: Get WireGuard IP from interface
-      shell: ip -4 addr show wg0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}'
-      register: wg_ip_result
-      changed_when: false
+    - name: Create private profile staging directory
+      tempfile:
+        path: /etc/wireguard
+        state: directory
+        prefix: .client-
+      register: client_staging
 
-    - name: Set WireGuard Gateway IP
-      set_fact:
-        wireguard_gateway_ip: "{{ wg_ip_result.stdout }}"
+    - name: Prepare and activate the client before exporting it
+      block:
+        - name: Stage a profile template without private keys
+          template:
+            src: templates/client.conf.j2
+            dest: "{{ client_staging.path }}/client.template"
+            mode: '0600'
+          vars:
+            client_address: '$WG_CLIENT_ADDRESS'
+            client_private_key: {stdout: '$WG_CLIENT_PRIVATE_KEY'}
+            server_public_key: {stdout: '$WG_SERVER_PUBLIC_KEY'}
+            wireguard_gateway_ip: '$WG_GATEWAY_IP'
+            wireguard_port: '$WG_SERVER_PORT'
+          diff: false
 
-    - name: Check if client configuration already exists
-      stat:
-        path: "/etc/wireguard/{{ client_name }}.conf"
-      register: client_conf
+        - name: Create or resume the client and reconcile the running configuration
+          command:
+            argv:
+              - "{{ ansible_facts.python.executable }}"
+              - /usr/local/lib/wireguard-manager/wireguard_manager.py
+              - add
+              - "{{ client_name }}"
+              - --profile-template
+              - "{{ client_staging.path }}/client.template"
+          register: client_creation
+          changed_when: (client_creation.stdout | from_json).changed | default(false)
 
-    - name: Fail if client configuration already exists
-      fail:
-        msg: "Client configuration for {{ client_name }} already exists!"
-      when: client_conf.stat.exists
+      always:
+        - name: Remove the completed profile staging files
+          file:
+            path: "{{ client_staging.path }}"
+            state: absent
 
-    # --- 2. IP Allocation Strategy ---
-    - name: Get list of used IPs from wg0.conf
-      # Improved grep to specifically look for peer AllowedIPs
-      shell: |
-        grep 'AllowedIPs' /etc/wireguard/wg0.conf | grep -v '/24' | awk -F '[=/]' '{print $2}' | sort -V | tail -n1
-      register: last_used_ip
-      changed_when: false
-      ignore_errors: true
+    - name: Create private local archive directory
+      file:
+        path: "{{ playbook_dir }}/clients"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      become: false
+      run_once: true
 
-    - name: Calculate next IP (First Client)
-      set_fact:
-        client_address: "{{ wireguard_gateway_ip | ansible.utils.ipmath(1) }}/32"
-      when: last_used_ip.stdout | length == 0
+    - name: Create private local archive directory for this server
+      file:
+        path: "{{ playbook_dir }}/clients/{{ inventory_hostname }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      become: false
 
-    - name: Calculate next IP (Subsequent Clients)
-      set_fact:
-        client_address: "{{ (last_used_ip.stdout | trim | regex_replace('/32', '')) | ansible.utils.ipmath(1) }}/32"
-      when: last_used_ip.stdout | length > 0
-
-    - name: Display assigned IP
-      debug:
-        msg: "Assigning IP {{ client_address }} to {{ client_name }}"
-
-    # --- 3. Key Generation ---
-    - name: Generate client private key
-      command: wg genkey
-      register: client_private_key
-      changed_when: false
-      no_log: true
-
-    - name: Derive client public key
-      shell: echo "{{ client_private_key.stdout }}" | wg pubkey
-      register: client_public_key
-      changed_when: false
-      no_log: true
-
-    - name: Derive server public key from file
-      shell: wg pubkey < /etc/wireguard/privatekey
-      register: server_public_key
-      changed_when: false
-      no_log: true
-
-    # --- 4. Server Configuration Update ---
-    - name: Check if client peer exists in wg0.conf
-      shell: grep -q '{{ client_public_key.stdout }}' /etc/wireguard/wg0.conf
-      register: client_in_config
-      ignore_errors: true
-      changed_when: false
-
-    - name: Add client peer to WireGuard server config
-      blockinfile:
-        path: /etc/wireguard/wg0.conf
-        marker: "# {mark} ANSIBLE MANAGED BLOCK FOR {{ client_name }}"
-        block: |
-          [Peer]
-          # {{ client_name }}
-          PublicKey = {{ client_public_key.stdout }}
-          AllowedIPs = {{ client_address }}
-      register: server_config_updated
-      when: client_in_config.rc != 0
-
-    # --- 5. Client Configuration Generation ---
-    - name: Generate client configuration file
-      template:
-        src: templates/client.conf.j2
-        dest: "/etc/wireguard/{{ client_name }}.conf"
-        owner: root
-        group: root
+    - name: Create the local archive file with private permissions before fetching
+      file:
+        path: "{{ playbook_dir }}/clients/{{ inventory_hostname }}/{{ client_name }}.zip"
+        state: touch
         mode: '0600'
-
-    # --- 6. Packaging & Delivery ---
-    - name: Zip the client configuration
-      command:
-        cmd: zip {{ client_name }}.zip {{ client_name }}.conf
-        chdir: /etc/wireguard
-      changed_when: false
+        access_time: preserve
+        modification_time: preserve
+      delegate_to: localhost
+      become: false
 
     - name: Fetch the zipped client configuration
       fetch:
         src: "/etc/wireguard/{{ client_name }}.zip"
-        dest: "./"
+        dest: "{{ playbook_dir }}/clients/{{ inventory_hostname }}/{{ client_name }}.zip"
         flat: yes
+
+    - name: Display local archive path
+      debug:
+        msg: "Client archive: {{ playbook_dir }}/clients/{{ inventory_hostname }}/{{ client_name }}.zip"
 
     - name: Ensure qrencode is installed
       package:
@@ -134,26 +101,16 @@
         state: present
 
     - name: Generate QR code
-      shell: qrencode -t ansiutf8 < /etc/wireguard/{{ client_name }}.conf
+      command:
+        argv:
+          - qrencode
+          - -t
+          - ansiutf8
+          - -r
+          - "/etc/wireguard/{{ client_name }}.conf"
       register: qr_code
       changed_when: false
 
     - name: Display QR code
       debug:
         msg: "{{ qr_code.stdout_lines }}"
-      run_once: true
-
-    # --- 7. Service Reload (Robust Block/Rescue) ---
-    - name: Reload WireGuard Configuration
-      block:
-        - name: Attempt hot reload (syncconf)
-          shell: wg syncconf wg0 <(wg-quick strip wg0)
-          args:
-            executable: /bin/bash
-          when: server_config_updated is changed
-
-      rescue:
-        - name: Fallback to hard restart
-          systemd:
-            name: wg-quick@wg0
-            state: restarted

@@ -1,0 +1,23 @@
+# Managed by the WireGuard project. Access is also restricted by the host firewall.
+listen_addr: 0.0.0.0:1053
+metrics_addr: 127.0.0.1:18080
+request_timeout: 4s
+cache_size: 10000
+allowed_clients:
+  - {{ wireguard_address | wireguard_network }}
+filter_malware: {{ dnsfilter_block_malware | default(true) | lower }}
+filter_porn: {{ dnsfilter_block_porn | default(false) | lower }}
+filter_ads: false
+whitelist: []
+resolver_unfiltered:
+  name: cloudflare
+  addr: 1.1.1.1:443
+  url: https://1.1.1.1/dns-query
+resolver_anti_malware:
+  name: cloudflare-malware
+  addr: 1.1.1.2:443
+  url: https://1.1.1.2/dns-query
+resolver_anti_porn:
+  name: cloudflare-family
+  addr: 1.1.1.3:443
+  url: https://1.1.1.3/dns-query

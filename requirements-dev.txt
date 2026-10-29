@@ -1,0 +1,5 @@
+# Complete development dependencies, including the controller dependencies.
+# Edit requirements-dev.in, then run make deps-lock.
+--require-hashes
+--only-binary=:all:
+-r locks/requirements-dev.lock

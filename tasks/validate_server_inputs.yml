@@ -1,0 +1,24 @@
+---
+- name: Validate server settings before changing packages or services
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution in ['Debian', 'Ubuntu']
+      - ansible_facts.service_mgr == 'systemd'
+      - (dns_server | wireguard_ipv4) == dns_server
+      - (wireguard_address | wireguard_address) | length > 0
+      - (wireguard_port | wireguard_number(1, 65535)) > 0
+      - (wireguard_mtu | wireguard_number(1280, 65535)) > 0
+      - (ansible_facts.default_ipv4.interface | wireguard_interface) | length > 0
+      - dnsfilter_enabled | default(false) is boolean
+    fail_msg: 'Setup requires Debian/Ubuntu with systemd, an IPv4 WAN route, a usable VPN subnet and valid DNS/port/MTU settings.'
+
+- name: Validate optional DNS filter settings
+  ansible.builtin.assert:
+    that:
+      - dnsfilter_block_malware | default(true) is boolean
+      - dnsfilter_block_porn | default(false) is boolean
+      - (wireguard_port | wireguard_number(1, 65535)) not in [1053, 18080]
+      - (ansible_port | default(22) | wireguard_number(1, 65535)) not in [1053, 18080]
+      - ansible_facts.architecture in ['x86_64', 'aarch64']
+    fail_msg: 'dnsfilter requires boolean filter flags, an amd64/arm64 server, and dedicated ports 1053 and 18080.'
+  when: dnsfilter_enabled | default(false)

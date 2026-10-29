@@ -1,0 +1,36 @@
+---
+# A loop around the whole reconnect/read sequence also handles a disconnect
+# while reading the receipt, or an apply job waiting for another management job.
+- name: Check completion of the detached apply operation
+  when: wireguard_apply_result is none
+  block:
+    - name: Reconnect after any WireGuard restart
+      wait_for_connection:
+        timeout: 5
+        connect_timeout: 2
+        sleep: 1
+      register: wireguard_reconnect
+      ignore_errors: true
+
+    - name: Read the completed operation receipt if available
+      slurp:
+        src: "{{ wireguard_staging.path }}/result.json"
+      when: wireguard_reconnect is succeeded
+      register: wireguard_receipt
+      ignore_errors: true
+      ignore_unreachable: true
+      no_log: true
+
+    - name: Record the server-side operation result
+      set_fact:
+        wireguard_apply_result: "{{ wireguard_receipt.content | b64decode | from_json }}"
+      when: wireguard_receipt.content is defined
+
+    - name: Wait before checking again
+      # pause is a global action and can skip this delay when the first host is
+      # already done. A delegated wait_for keeps the delay specific to each host.
+      ansible.builtin.wait_for:
+        timeout: 5
+      delegate_to: localhost
+      become: false
+      when: wireguard_apply_result is none

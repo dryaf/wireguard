@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Host-side code only selects the engine and explicit mounts. Tooling runs in images.
+set -euo pipefail
+umask 077
+
+project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+cd "$project_root"
+operation=${1:?Usage: scripts/container COMMAND [ARGS...]}
+shift
+
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+
+if [[ -n ${CONTAINER_ENGINE:-} ]]; then
+    engine=$CONTAINER_ENGINE
+elif command -v podman >/dev/null 2>&1; then
+    engine=podman
+elif command -v docker >/dev/null 2>&1; then
+    engine=docker
+else
+    fail 'Install Docker or Podman. Project tools are never run on the host.'
+fi
+command -v "$engine" >/dev/null 2>&1 || fail "Container engine not found: $engine"
+engine_version=$("$engine" --version)
+host_uid=$(id -u)
+host_gid=$(id -g)
+[[ $host_uid != 0 ]] || fail 'Run the container tooling from a non-root account.'
+
+target=runtime
+network=none
+needs_inventory=false
+needs_agent=false
+write_hosts=false
+case "$operation" in
+    build|test|syntax-check|deps-check) ;;
+    dnsfilter-test) target=dnsfilter-tests ;;
+    integration-test|firewall-test)
+        [[ $(uname -s) == Linux && $engine_version == *[Pp]odman* ]] || fail 'Native integration tests require rootless Podman on Linux.'
+        [[ $("$engine" info --format '{{.Host.Security.Rootless}}') == true ]] || fail 'Native integration tests require a rootless engine.'
+        target=network-tests ;;
+    deps-lock) target=lock-tools; network=default ;;
+    audit) target=dev; network=default ;;
+    osv-scan) target=osv-tools; network=default ;;
+    init) ;;
+    trust-host) needs_inventory=true; write_hosts=true; network=default ;;
+    clean_known_hosts) needs_inventory=true; write_hosts=true ;;
+    check-ssh|vpn-server-setup|vpn-firewall-setup|vpn-server-status|vpn-client-add|vpn-client-remove|vpn-client-qrcode|vpn-client-list|vpn-debug|vpn-monitor|check-auto-upgrades|enable-auto-upgrades|disable-auto-upgrades|server-hardening|playbook)
+        needs_inventory=true; needs_agent=true; network=default ;;
+    *) fail "Unknown container command: $operation" ;;
+esac
+
+run_args=(run --rm --interactive --read-only --cap-drop=ALL --security-opt=no-new-privileges
+    --pids-limit=256 --memory=1g --tmpfs /tmp:rw,nosuid,nodev,size=512m
+    --user "$host_uid:$host_gid" --workdir /workspace)
+if [[ $engine_version == *[Pp]odman* ]]; then
+    run_args+=(--userns=keep-id)
+fi
+if [[ -t 0 && -t 1 ]]; then run_args+=(--tty); fi
+if [[ $network == none ]]; then run_args+=(--network=none); fi
+
+# Docker --mount treats commas as separators. Reject these paths instead of
+# accidentally interpreting a user-supplied path as additional mount options.
+mount_file() {
+    local source=$1 destination=$2 mode=$3
+    [[ $source == /* && $source != *,* && $source != *$'\n'* ]] || fail 'Mount paths must be absolute and contain no commas or newlines.'
+    local specification="type=bind,src=$source,dst=$destination"
+    if [[ $mode == readonly ]]; then specification+=,readonly; fi
+    run_args+=(--mount "$specification")
+}
+absolute_path() {
+    case "$1" in /*) printf '%s\n' "$1" ;; *) printf '%s/%s\n' "$project_root" "$1" ;; esac
+}
+
+inventory=$(absolute_path "${WG_INVENTORY:-inventory.ini}")
+known_hosts=$(absolute_path "${WG_KNOWN_HOSTS:-.container/known_hosts}")
+if [[ $needs_inventory == true ]]; then
+    [[ -f $inventory && -r $inventory ]] || fail "Inventory missing or unreadable: $inventory (run make init)."
+    mount_file "$inventory" /run/wireguard/inventory.ini readonly
+fi
+if [[ $needs_agent == true ]]; then
+    [[ -s $known_hosts && -r $known_hosts ]] || fail 'Verified SSH host keys are required. Run make trust-host or set WG_KNOWN_HOSTS to a verified known_hosts file.'
+    mount_file "$known_hosts" /run/wireguard/known_hosts readonly
+    agent_socket=${WG_SSH_AUTH_SOCK:-${SSH_AUTH_SOCK:-}}
+    if [[ $(uname -s) == Darwin && $engine_version == *Docker* ]]; then
+        agent_socket=${WG_SSH_AUTH_SOCK:-/run/host-services/ssh-auth.sock}
+    fi
+    if [[ $agent_socket != /run/host-services/ssh-auth.sock ]]; then
+        [[ -n $agent_socket && -S $agent_socket ]] || fail 'Load the deployment key into an SSH agent and set SSH_AUTH_SOCK.'
+    fi
+    mount_file "$agent_socket" /run/wireguard/ssh-agent readonly
+    run_args+=(--env SSH_AUTH_SOCK=/run/wireguard/ssh-agent)
+fi
+if [[ $write_hosts == true ]]; then
+    if [[ $operation == trust-host ]]; then
+        mkdir -p -- "$(dirname -- "$known_hosts")"
+        if [[ ! -e $known_hosts ]]; then (set -o noclobber; : > "$known_hosts"); fi
+    fi
+    [[ -f $known_hosts && -w $known_hosts ]] || fail "known_hosts missing or not writable: $known_hosts"
+    mount_file "$known_hosts" /run/wireguard/known_hosts rw
+fi
+if [[ $operation == init ]]; then
+    [[ ! -s $inventory ]] || fail "Refusing to overwrite existing inventory: $inventory"
+    if [[ ! -e $inventory ]]; then (set -o noclobber; : > "$inventory"); fi
+    mount_file "$inventory" /run/wireguard/inventory.ini rw
+fi
+if [[ $operation == vpn-client-add || $operation == playbook ]]; then
+    output_dir=$(absolute_path "${WG_CLIENTS_DIR:-clients}")
+    mkdir -p -- "$output_dir"
+    chmod 700 -- "$output_dir"
+    mount_file "$output_dir" /workspace/clients rw
+fi
+if [[ $operation == deps-lock ]]; then
+    mkdir -p locks
+    mount_file "$project_root/locks" /workspace/locks rw
+fi
+case "$operation" in
+    vpn-client-add|vpn-client-remove|vpn-client-qrcode|playbook)
+        if [[ ${CLIENT_NAME+x} ]]; then run_args+=(--env CLIENT_NAME); fi ;;
+esac
+if [[ $operation == vpn-server-setup ]]; then
+    if [[ ${DNS_SERVER+x} ]]; then run_args+=(--env DNS_SERVER); fi
+    if [[ ${DNSFILTER+x} ]]; then run_args+=(--env DNSFILTER); fi
+fi
+
+build_dir=$(mktemp -d "${TMPDIR:-/tmp}/wireguard-image.XXXXXXXX")
+cleanup() {
+    if [[ -s $build_dir/container-id ]]; then
+        local owned_container
+        owned_container=$(cat "$build_dir/container-id")
+        if [[ $owned_container =~ ^[0-9a-f]{64}$ ]]; then
+            "$engine" rm --force "$owned_container" >/dev/null || true
+        fi
+    fi
+    rm -rf -- "$build_dir"
+}
+trap cleanup EXIT
+if [[ $operation == osv-scan ]]; then
+    source "$project_root/scripts/osv_scan.sh"
+    exit "$osv_exit"
+fi
+"$engine" build --target "$target" --build-arg "WG_UID=$host_uid" --build-arg "WG_GID=$host_gid" \
+    --iidfile "$build_dir/id" --file Dockerfile "$project_root" >&2
+image_id=$(cat "$build_dir/id")
+[[ $image_id =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'Container build did not produce an immutable image ID.'
+if [[ $operation == build ]]; then
+    printf '%s\n' "$image_id"
+    exit 0
+fi
+if [[ $operation == integration-test || $operation == firewall-test ]]; then
+    # This separate fixture needs systemd and NET_ADMIN inside its own user and
+    # network namespaces. It has no host mounts, credentials or external network.
+    "$engine" run --detach --cidfile "$build_dir/container-id" --network=none \
+        --cap-add=NET_ADMIN --security-opt=no-new-privileges --systemd=always \
+        --pids-limit=512 --memory=1g --env "WG_RELEASE_HOST_NETNS=$(readlink /proc/self/ns/net)" \
+        --entrypoint /lib/systemd/systemd "$image_id" --unit=basic.target >/dev/null
+    test_args=()
+    if [[ $operation == firewall-test ]]; then test_args+=(--firewall-only); fi
+    "$engine" exec "$(cat "$build_dir/container-id")" python tests/test_network_integration.py "${test_args[@]}"
+    exit 0
+fi
+"$engine" "${run_args[@]}" "$image_id" "$operation" "$@"

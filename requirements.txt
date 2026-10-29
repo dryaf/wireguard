@@ -1,0 +1,5 @@
+# Complete controller dependencies for installers and recursive scanners.
+# Edit requirements.in, then run make deps-lock.
+--require-hashes
+--only-binary=:all:
+-r locks/requirements.lock

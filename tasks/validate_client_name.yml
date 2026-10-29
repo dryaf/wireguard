@@ -1,0 +1,11 @@
+---
+- name: Validate client name before accessing files or running commands
+  assert:
+    that:
+      - client_name is defined
+      - client_name | wireguard_safe_client_name
+      - (wireguard_allow_legacy_names | default(false)) or (client_name | wireguard_valid_client_name)
+    fail_msg: >-
+      Client names must start with a letter or digit and contain only letters,
+      digits, dots, underscores, plus, equals or hyphens. New names have at most
+      15 characters; safe existing filenames may be longer. wg0 is reserved.

@@ -1,0 +1,265 @@
+---
+- name: Install the DNS filter container runtime
+  ansible.builtin.apt:
+    name: [podman, ca-certificates]
+    state: present
+    lock_timeout: 300
+
+- name: Create a private DNS filter deployment directory
+  ansible.builtin.file:
+    path: /etc/wireguard-dnsfilter
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Create private DNS filter staging directory
+  ansible.builtin.tempfile:
+    path: /etc/wireguard-dnsfilter
+    state: directory
+    prefix: .deploy-
+  register: dnsfilter_stage
+
+- name: Initialize DNS deployment recovery state
+  ansible.builtin.set_fact:
+    dnsfilter_live_changes: false
+    dnsfilter_activation_attempted: false
+    dnsfilter_succeeded: false
+    dnsfilter_restored: false
+    dnsfilter_lock_acquired: false
+    dnsfilter_files:
+      - {name: config, path: /etc/wireguard-dnsfilter/config.yml}
+      - {name: unit, path: /etc/systemd/system/wireguard-dnsfilter.service}
+
+- name: Build, validate and activate the optional DNS filter
+  block:
+    - name: Acquire the DNS deployment lock atomically
+      ansible.builtin.command:
+        argv: [mkdir, '--mode=0700', --, /run/wireguard-dnsfilter-setup.lock]
+      register: dnsfilter_lock_result
+      changed_when: dnsfilter_lock_result.rc == 0
+      failed_when: false
+
+    - name: Record ownership of this run's deployment lock
+      ansible.builtin.set_fact:
+        dnsfilter_lock_acquired: "{{ dnsfilter_lock_result.rc == 0 }}"
+
+    - name: Refuse overlapping or interrupted DNS deployments
+      ansible.builtin.assert:
+        that: dnsfilter_lock_acquired
+        fail_msg: 'DNS setup is active or was interrupted. Inspect /run/wireguard-dnsfilter-setup.lock and retained /etc/wireguard-dnsfilter/.deploy-* files before retrying; existing DNS was left unchanged.'
+
+    - name: Inspect previous DNS filter files without following links
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+        follow: false
+      loop: "{{ dnsfilter_files }}"
+      register: dnsfilter_previous_files
+
+    - name: Require regular managed deployment files
+      ansible.builtin.assert:
+        that:
+          - not item.stat.exists or (item.stat.isreg and not item.stat.islnk)
+      loop: "{{ dnsfilter_previous_files.results }}"
+
+    - name: Inspect existing service ownership
+      ansible.builtin.slurp:
+        src: /etc/systemd/system/wireguard-dnsfilter.service
+      when: dnsfilter_previous_files.results[1].stat.exists
+      register: dnsfilter_previous_unit
+
+    - name: Refuse to replace an unrelated systemd service
+      ansible.builtin.assert:
+        that:
+          - "'Managed by the WireGuard project' in (dnsfilter_previous_unit.content | b64decode)"
+      when: dnsfilter_previous_files.results[1].stat.exists
+
+    - name: Read previous service state
+      ansible.builtin.service_facts:
+
+    - name: Remember previous DNS filter state
+      ansible.builtin.set_fact:
+        dnsfilter_previous_service: "{{ ansible_facts.services.get('wireguard-dnsfilter.service', {}) }}"
+
+    - name: Ignore stale systemd records for a removed unit
+      ansible.builtin.set_fact:
+        dnsfilter_previous_service: {}
+      when: dnsfilter_previous_service.status | default('') == 'not-found'
+
+    - name: Refuse to shadow a service without a managed local unit
+      ansible.builtin.assert:
+        that:
+          - dnsfilter_previous_service | length == 0 or dnsfilter_previous_files.results[1].stat.exists
+        fail_msg: 'An existing wireguard-dnsfilter service has no managed local unit; it was left unchanged.'
+
+    - name: Check reserved ports before the first installation
+      ansible.builtin.command:
+        argv: [ss, -H, -ntu, -a, '( sport = :1053 or sport = :18080 )']
+      register: dnsfilter_reserved_ports
+      changed_when: false
+      when: dnsfilter_previous_service.state | default('') != 'running'
+
+    - name: Require free DNS filter ports
+      ansible.builtin.assert:
+        that:
+          - dnsfilter_reserved_ports.stdout | trim | length == 0
+        fail_msg: 'Ports 1053 and 18080 are already in use; existing listeners were left unchanged.'
+      when: dnsfilter_previous_service.state | default('') != 'running'
+
+    - name: Create a build context containing only the pinned recipe
+      ansible.builtin.file:
+        path: "{{ dnsfilter_stage.path }}/build"
+        state: directory
+        mode: '0700'
+
+    - name: Stage the pinned container build recipe
+      ansible.builtin.copy:
+        src: Dockerfile
+        dest: "{{ dnsfilter_stage.path }}/build/Containerfile"
+        mode: '0600'
+
+    - name: Build the pinned DNS filter entirely inside containers
+      ansible.builtin.command:
+        argv:
+          - podman
+          - build
+          - --target=dnsfilter-runtime
+          - --memory=1g
+          - "--iidfile={{ dnsfilter_stage.path }}/image-id"
+          - "--file={{ dnsfilter_stage.path }}/build/Containerfile"
+          - "{{ dnsfilter_stage.path }}/build"
+      changed_when: false
+
+    - name: Read the exact built image ID
+      ansible.builtin.slurp:
+        src: "{{ dnsfilter_stage.path }}/image-id"
+      register: dnsfilter_built_image
+
+    - name: Record the immutable DNS filter image
+      ansible.builtin.set_fact:
+        dnsfilter_image_id: "{{ dnsfilter_built_image.content | b64decode | trim }}"
+
+    - name: Validate the immutable image identifier
+      ansible.builtin.assert:
+        that:
+          - dnsfilter_image_id is match('^sha256:[a-f0-9]{64}$')
+
+    - name: Stage the DNS policy for the actual VPN subnet
+      ansible.builtin.template:
+        src: templates/dnsfilter.yml.j2
+        dest: "{{ dnsfilter_stage.path }}/config.yml"
+        mode: '0444'
+
+    - name: Validate the policy in an isolated non-root container
+      ansible.builtin.command:
+        argv:
+          - podman
+          - run
+          - --rm
+          - --pull=never
+          - --network=none
+          - --read-only
+          - --user=65532:65532
+          - --cap-drop=ALL
+          - --security-opt=no-new-privileges
+          - --pids-limit=128
+          - --memory=256m
+          - "--mount=type=bind,src={{ dnsfilter_stage.path }}/config.yml,dst=/etc/dnsfilter.yml,readonly"
+          - "{{ dnsfilter_image_id }}"
+          - -checkConfig
+          - -configFile
+          - /etc/dnsfilter.yml
+      changed_when: false
+
+    - name: Stage the container service definition
+      ansible.builtin.template:
+        src: templates/wireguard-dnsfilter.service.j2
+        dest: "{{ dnsfilter_stage.path }}/unit"
+        mode: '0600'
+
+    - name: Preserve existing configuration and service definition
+      ansible.builtin.copy:
+        src: "{{ item.item.path }}"
+        dest: "{{ dnsfilter_stage.path }}/previous-{{ item.item.name }}"
+        remote_src: true
+        mode: preserve
+      loop: "{{ dnsfilter_previous_files.results }}"
+      when: item.stat.exists
+
+    - name: Record the start of live DNS changes
+      ansible.builtin.set_fact:
+        dnsfilter_live_changes: true
+
+    - name: Activate the validated configuration
+      ansible.builtin.copy:
+        src: "{{ dnsfilter_stage.path }}/config.yml"
+        dest: /etc/wireguard-dnsfilter/config.yml
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0444'
+      register: dnsfilter_config_install
+
+    - name: Activate the managed container unit
+      ansible.builtin.copy:
+        src: "{{ dnsfilter_stage.path }}/unit"
+        dest: /etc/systemd/system/wireguard-dnsfilter.service
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+      register: dnsfilter_unit_install
+
+    - name: Record the service activation attempt
+      ansible.builtin.set_fact:
+        dnsfilter_activation_attempted: true
+
+    - name: Start and enable the container with its private DNS port guard
+      ansible.builtin.systemd_service:
+        name: wireguard-dnsfilter
+        enabled: true
+        daemon_reload: true
+        state: "{{ 'restarted' if dnsfilter_config_install.changed or dnsfilter_unit_install.changed else 'started' }}"
+
+    - name: Verify the running container over UDP and TCP
+      ansible.builtin.include_tasks: verify_dnsfilter.yml
+
+    - name: Mark successful DNS deployment
+      ansible.builtin.set_fact:
+        dnsfilter_succeeded: true
+
+  rescue:
+    - name: Record the DNS deployment error
+      ansible.builtin.set_fact:
+        dnsfilter_failure: "{{ ansible_failed_result.msg | default('DNS filter deployment failed') }}"
+
+    - name: Restore the previous DNS installation after live changes
+      when: dnsfilter_live_changes
+      block:
+        - name: Roll back DNS files and service state
+          ansible.builtin.include_tasks: rollback_dnsfilter.yml
+        - name: Record completed DNS recovery
+          ansible.builtin.set_fact:
+            dnsfilter_restored: true
+      rescue:
+        - name: Preserve recovery files after incomplete rollback
+          ansible.builtin.fail:
+            msg: "DNS filter deployment and rollback failed. Recovery files remain in {{ dnsfilter_stage.path }} and the deployment lock remains at /run/wireguard-dnsfilter-setup.lock. {{ dnsfilter_failure }}"
+
+    - name: Report the rejected DNS deployment before changing VPN routing
+      ansible.builtin.fail:
+        msg: "{{ 'Previous DNS installation restored.' if dnsfilter_restored else 'DNS deployment rejected before live changes.' }} {{ dnsfilter_failure }}"
+
+  always:
+    - name: Remove completed DNS staging files
+      ansible.builtin.file:
+        path: "{{ dnsfilter_stage.path }}"
+        state: absent
+      # Keep successful candidates' backups until the VPN operation also succeeds.
+      when: dnsfilter_restored or not dnsfilter_live_changes
+
+    - name: Release this run's lock after rejected deployment or completed recovery
+      ansible.builtin.file:
+        path: /run/wireguard-dnsfilter-setup.lock
+        state: absent
+      when: dnsfilter_lock_acquired and (dnsfilter_restored or not dnsfilter_live_changes)

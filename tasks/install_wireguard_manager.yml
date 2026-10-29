@@ -1,0 +1,20 @@
+---
+- name: Create private directory for WireGuard management helpers
+  file:
+    path: /usr/local/lib/wireguard-manager
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Install WireGuard management helpers
+  copy:
+    src: "{{ item.src }}"
+    dest: "/usr/local/lib/wireguard-manager/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: '0700'
+  loop:
+    - {src: 'filter_plugins/wireguard.py', dest: 'wireguard.py'}
+    - {src: 'files/wireguard_manager.py', dest: 'wireguard_manager.py'}
+    - {src: 'files/wireguard_firewall.py', dest: 'wireguard_firewall.py'}

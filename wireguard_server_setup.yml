@@ -6,160 +6,100 @@
     wireguard_address: '10.99.0.1/24'
     wireguard_port: 51820
     wireguard_mtu: 1280
-    dns_server: '10.99.0.1' # dnsfilter should listen on this IP
+    dns_server: '1.1.1.1'
+    dnsfilter_enabled: false
+    dnsfilter_block_malware: true
+    dnsfilter_block_porn: false
 
   tasks:
-    - name: Wait for dpkg/apt lock
-      shell: |
-        while sudo lsof /var/lib/dpkg/lock >/dev/null; do
-          sleep 1
-        done
+    - name: Validate platform and server settings
+      ansible.builtin.import_tasks: tasks/validate_server_inputs.yml
 
     - name: Update and Upgrade all packages
-      package:
-        name: '*'
-        state: latest
-        use: auto
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+        upgrade: safe
+        force_apt_get: true
+        lock_timeout: 300
 
     # Removed 'iptables-persistent' to avoid conflict with UFW
     - name: Install necessary packages
-      package:
-        name: ['wireguard', 'qrencode', 'zip', 'unattended-upgrades', 'update-notifier-common']
+      ansible.builtin.apt:
+        name: "{{ ['wireguard', 'iproute2', 'iptables', 'procps', 'qrencode', 'unattended-upgrades'] + (['update-notifier-common'] if ansible_facts.distribution == 'Ubuntu' else []) }}"
         state: present
+        lock_timeout: 300
 
-    # --- Conflict Resolution for dnsfilter ---
-    - name: Stop systemd-resolved to free port 53
-      systemd:
-        name: systemd-resolved
-        state: stopped
-        enabled: no
-      ignore_errors: yes
-
-    - name: Remove symlinked resolv.conf
-      file:
-        path: /etc/resolv.conf
-        state: absent
-
-    - name: Create static resolv.conf using public DNS (bootstrapping)
-      copy:
-        content: "nameserver 1.1.1.1\nnameserver 8.8.8.8"
-        dest: /etc/resolv.conf
-        mode: '0644'
-    # ----------------------------------------
-
-    - name: Generate WireGuard server keys if not exist
-      block:
-        - name: Check if WireGuard private key exists
-          stat:
-            path: /etc/wireguard/privatekey
-          register: privatekey
-
-        - name: Generate WireGuard server keys
-          command: wg genkey
-          register: server_private_key
-          changed_when: false
-          when: not privatekey.stat.exists
-          no_log: true
-
-        - name: Write WireGuard private key
-          copy:
-            content: "{{ server_private_key.stdout }}"
-            dest: /etc/wireguard/privatekey
-            mode: '0600'
-          when: not privatekey.stat.exists
-          no_log: true
-          notify: Restart wg-quick
-
-        - name: Derive WireGuard server public key
-          shell: wg pubkey < /etc/wireguard/privatekey
-          register: server_public_key
-          changed_when: false
-          no_log: true
-      become: yes
-
-    - name: Read existing private key
-      slurp:
-        src: /etc/wireguard/privatekey
-      register: existing_private_key
-      no_log: true
-
-    - name: Set private key variable
-      set_fact:
-        server_priv_key_final: "{{ (server_private_key.stdout | default(existing_private_key.content | b64decode)) }}"
-      no_log: true
-
-    - name: Ensure ip forwarding is set up (System persistence)
-      sysctl:
-        name: "{{ item.key }}"
-        value: "{{ item.value }}"
-        state: present
-        reload: yes
-      loop:
-        - { key: 'net.ipv4.ip_forward', value: 1 }
-        - { key: 'net.ipv6.conf.all.forwarding', value: 1 }
-
-    - name: Enable unattended upgrades
-      copy:
-        dest: /etc/apt/apt.conf.d/50unattended-upgrades
-        content: |
-          Unattended-Upgrade::Allowed-Origins {
-            "${distro_id}:${distro_codename}";
-            "${distro_id}:${distro_codename}-security";
-            "${distro_id}ESM:${distro_codename}";
-          };
-      notify:
-        - Restart unattended-upgrades
-
-    - name: Configure periodic updates
-      copy:
-        dest: /etc/apt/apt.conf.d/20auto-upgrades
-        content: |
-          APT::Periodic::Update-Package-Lists "1";
-          APT::Periodic::Download-Upgradeable-Packages "1";
-          APT::Periodic::Unattended-Upgrade "1";
-          APT::Periodic::AutocleanInterval "7";
-
-    - name: Setup WireGuard configuration
-      template:
-        src: templates/wg0.conf.j2
-        dest: /etc/wireguard/wg0.conf
-        owner: root
-        group: root
-        mode: '0600'
-      no_log: false
-      notify:
-        - Restart wg-quick
-
-    # Removed iptables-save task as it conflicts with UFW persistence
-
-    - name: Enable and start WireGuard service
-      systemd:
-        name: wg-quick@wg0
-        enabled: yes
-        state: started
-
-    - name: Check WireGuard server status
-      command: wg show wg0
-      register: wireguard_status
-      ignore_errors: true
+    - name: Verify that the kernel and security policy allow WireGuard management
+      ansible.builtin.command:
+        argv: [wg, show, interfaces]
       changed_when: false
 
-    - name: Display WireGuard server status
-      debug:
-        var: wireguard_status.stdout_lines
+    - name: Restrict access to the WireGuard key directory
+      file:
+        path: /etc/wireguard
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
 
-    - name: Fail if WireGuard server is not running
-      fail:
-        msg: "WireGuard server is not running correctly."
-      when: wireguard_status.rc != 0
+    - name: Install transaction helper
+      import_tasks: tasks/install_wireguard_manager.yml
+
+    - name: Prepare optional DNS filtering before changing VPN routing
+      ansible.builtin.include_tasks: tasks/install_dnsfilter.yml
+      when: dnsfilter_enabled
+
+    - name: Initialize combined setup result
+      ansible.builtin.set_fact:
+        wireguard_setup_complete: false
+
+    - name: Configure the VPN with DNS recovery on failure
+      block:
+        - name: Apply and verify WireGuard
+          ansible.builtin.import_tasks: tasks/configure_wireguard.yml
+        - name: Mark successful VPN setup
+          ansible.builtin.set_fact:
+            wireguard_setup_complete: true
+      rescue:
+        - name: Remember the VPN setup error
+          ansible.builtin.set_fact:
+            wireguard_setup_failure: "{{ ansible_failed_result.msg | default('WireGuard setup failed') }}"
+        - name: Restore the previous DNS policy if VPN setup failed
+          when: dnsfilter_enabled and dnsfilter_succeeded | default(false)
+          block:
+            - name: Roll back DNS after VPN failure
+              ansible.builtin.include_tasks: tasks/rollback_dnsfilter.yml
+            - name: Mark completed DNS recovery
+              ansible.builtin.set_fact:
+                dnsfilter_restored: true
+          rescue:
+            - name: Report incomplete DNS recovery and preserve its files
+              ansible.builtin.fail:
+                msg: "WireGuard setup and DNS recovery failed. Recovery files remain in {{ dnsfilter_stage.path }} and the deployment lock remains at /run/wireguard-dnsfilter-setup.lock. {{ wireguard_setup_failure }}"
+        - name: Report the unsuccessful VPN setup
+          ansible.builtin.fail:
+            msg: "{{ wireguard_setup_failure }}"
+      always:
+        - name: Remove DNS recovery files after success or completed rollback
+          ansible.builtin.file:
+            path: "{{ dnsfilter_stage.path }}"
+            state: absent
+          when:
+            - dnsfilter_enabled
+            - wireguard_setup_complete or dnsfilter_restored | default(false)
+            - dnsfilter_stage is defined
+        - name: Release this run's DNS deployment lock after success or completed recovery
+          ansible.builtin.file:
+            path: /run/wireguard-dnsfilter-setup.lock
+            state: absent
+          when:
+            - dnsfilter_enabled
+            - dnsfilter_lock_acquired | default(false)
+            - wireguard_setup_complete or dnsfilter_restored | default(false)
 
   handlers:
     - name: Restart unattended-upgrades
       systemd:
         name: unattended-upgrades
-        state: restarted
-
-    - name: Restart wg-quick
-      systemd:
-        name: wg-quick@wg0
         state: restarted

@@ -1,0 +1,9 @@
+:wg-private-services - [0:0]
+-A {{ item.chain }} -j wg-private-services
+-A wg-private-services -i lo -j RETURN
+-A wg-private-services -i wg0 -j RETURN
+-A wg-private-services -p tcp --dport {{ ssh_port | int }} -j RETURN
+-A wg-private-services -p udp --dport {{ wireguard_port | int }} -j RETURN
+-A wg-private-services -p udp --dport 53 -j DROP
+-A wg-private-services -p tcp --dport 53 -j DROP
+-A wg-private-services -p tcp --dport 8080 -j DROP

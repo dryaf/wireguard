@@ -1,0 +1,51 @@
+---
+- name: Stop the failed candidate and restore startup enablement
+  ansible.builtin.systemd_service:
+    name: wireguard-dnsfilter
+    state: stopped
+    enabled: "{{ dnsfilter_previous_service.status | default('disabled') == 'enabled' }}"
+  when: dnsfilter_activation_attempted
+
+- name: Confirm that the failed managed container stopped before restoring files
+  ansible.builtin.command:
+    argv: [podman, ps, '--filter=label=io.dryaf.wireguard.dnsfilter=managed', '--filter=name=wireguard-dnsfilter', --quiet]
+  register: dnsfilter_remaining_containers
+  changed_when: false
+  failed_when: dnsfilter_remaining_containers.rc != 0 or dnsfilter_remaining_containers.stdout | trim | length > 0
+  when: dnsfilter_activation_attempted
+
+- name: Restore previous files atomically
+  ansible.builtin.copy:
+    src: "{{ dnsfilter_stage.path }}/previous-{{ item.item.name }}"
+    dest: "{{ item.item.path }}"
+    remote_src: true
+    mode: preserve
+  loop: "{{ dnsfilter_previous_files.results }}"
+  when: item.stat.exists
+
+- name: Remove files created by the rejected first installation
+  ansible.builtin.file:
+    path: "{{ item.item.path }}"
+    state: absent
+  loop: "{{ dnsfilter_previous_files.results }}"
+  when: not item.stat.exists
+
+- name: Reload the restored service definitions
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Remove the new port guard when no previous installation existed
+  ansible.builtin.command:
+    argv: [/usr/local/lib/wireguard-manager/wireguard_firewall.py, unprotect-dns]
+  when: not dnsfilter_previous_files.results[1].stat.exists and dnsfilter_activation_attempted
+
+- name: Restore the previous service's running state
+  ansible.builtin.systemd_service:
+    name: wireguard-dnsfilter
+    state: "{{ 'started' if dnsfilter_previous_service.state == 'running' else 'stopped' }}"
+    enabled: "{{ dnsfilter_previous_service.status | default('disabled') == 'enabled' }}"
+  when: dnsfilter_previous_service | length > 0 and dnsfilter_activation_attempted
+
+- name: Verify the restored running DNS filter
+  ansible.builtin.include_tasks: verify_dnsfilter.yml
+  when: dnsfilter_previous_service.state | default('') == 'running' and dnsfilter_activation_attempted
