@@ -1,70 +1,39 @@
 ---
-- hosts: servers
-  become: yes
-  gather_facts: yes
-  vars:
-    dns_target_ip: "10.99.0.1"
+- name: Check WireGuard Internet access after upgrades or reboot
+  hosts: servers
+  become: true
+  gather_facts: false
   tasks:
-    - name: 1. Check IP Forwarding (Must be 1)
-      command: sysctl net.ipv4.ip_forward
-      register: ip_forward
-      changed_when: false
-
-    - name: 2. Check WireGuard Interface Status (MTU & Key)
-      command: wg show wg0
-      register: wg_status
-      changed_when: false
-
-    - name: 3. Check UDP Port 51820 (Process Listener)
-      shell: ss -ulpn | grep 51820
-      register: port_check
-      ignore_errors: yes
-      changed_when: false
-
-    - name: 4. Check DNS Listener Process
-      # Modified to show exactly WHAT is listening.
-      shell: ss -ulpn | grep :53
-      register: dns_details
-      ignore_errors: yes
-      changed_when: false
-
-    - name: 5. Check IPTables NAT Rules (Masquerading)
-      shell: iptables -t nat -L POSTROUTING -n -v
-      register: nat_rules
-      changed_when: false
-
-    - name: 6. Check IPTables DNAT Rules (DNS Redirection)
-      shell: iptables -t nat -L PREROUTING -n -v
-      register: dnat_rules
-      changed_when: false
-
-    - name: 7. Check UFW Firewall Status
-      command: ufw status verbose
-      register: ufw_status
+    - name: Collect server diagnostics without changing configuration or services
+      ansible.builtin.script:
+        cmd: files/wireguard_diagnostics.py
+        executable: /usr/bin/python3
+      register: vpn_diagnostics
       changed_when: false
       failed_when: false
+      check_mode: false
 
-    - name: 8. Check for Recent Handshakes
-      # Dumps handshakes in seconds since epoch. Helps find dead peers.
-      shell: wg show wg0 latest-handshakes
-      register: handshakes
-      changed_when: false
+    - name: Display the complete report, including checks after a failure
+      ansible.builtin.debug:
+        msg: "{{ vpn_diagnostics.stdout_lines | default([]) }}"
 
-    # --- Report ---
-    - name: "=== DEBUG REPORT ==="
-      debug:
-        msg:
-          - "IP Forwarding: {{ ip_forward.stdout }}"
-          - "WireGuard Port Open: {{ 'YES' if port_check.rc == 0 else 'NO (Critical)' }}"
-          - "--- UFW Firewall Status ---"
-          - "{{ ufw_status.stdout_lines | default(['UFW Not Installed/Active']) }}"
-          - "--- DNS Listeners (Look for *:53 or 10.99.0.1:53) ---"
-          - "{{ dns_details.stdout_lines }}"
-          - "--- WireGuard Status (Check MTU should be 1280) ---"
-          - "{{ wg_status.stdout_lines }}"
-          - "--- Handshake Status (0 means never connected) ---"
-          - "{{ handshakes.stdout_lines }}"
-          - "--- NAT Masquerade Rules (Look for 10.99.0.0/24) ---"
-          - "{{ nat_rules.stdout_lines }}"
-          - "--- DNS Redirection Rules ---"
-          - "{{ dnat_rules.stdout_lines }}"
+    - name: Require successful server checks
+      vars:
+        vpn_failed_checks: >-
+          {{ vpn_diagnostics.stdout_lines | default([]) | select('match', '^\[FAIL\]') | list }}
+        vpn_diagnostic_errors: >-
+          {{ vpn_diagnostics.stderr_lines | default([]) | reject('match', '^Shared connection to .* closed\.\s*$') | list }}
+      ansible.builtin.assert:
+        that: vpn_diagnostics.rc | default(1) == 0
+        fail_msg: |-
+          VPN checks failed (diagnostic exit code {{ vpn_diagnostics.rc | default('unavailable') }}).
+          {% if vpn_failed_checks | length > 0 %}
+          {{ vpn_failed_checks | join('\n') }}
+          Review the corresponding Next hints in the complete report above.
+          {% else %}
+          The diagnostic did not report any [FAIL] findings; it may have failed to start or stopped unexpectedly.
+          {{ vpn_diagnostics.stdout | default('No diagnostic output available.', true) }}
+          {{ vpn_diagnostic_errors | join('\n') }}
+          {{ vpn_diagnostics.msg | default('') }}
+          {% endif %}
+        success_msg: Server checks passed; review warnings and verify Internet access from a connected VPN client.

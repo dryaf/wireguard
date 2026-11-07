@@ -9,6 +9,7 @@ profile wireguard-firewall {
   capability net_raw,
   network netlink raw,
   network inet raw,
+  network inet dgram,
   network inet6 raw,
 
   /usr/bin/python3{,.[0-9]*} mrix,
@@ -17,6 +18,8 @@ profile wireguard-firewall {
   /usr/local/lib/wireguard-manager/__pycache__/ r,
   /usr/local/lib/wireguard-manager/__pycache__/{wireguard_firewall,wireguard}.*.pyc r,
   /{usr/,}sbin/xtables-{legacy,nft}-multi mrix,
+  /{usr/,}{sbin,bin}/ip mrix,
+  /{etc,usr/lib,usr/share}/iproute2/{,**} r,
   /etc/wireguard/.firewall.lock rwk,
   /run/xtables.lock rwk,
   @{PROC}/@{pid}/net/ip{,6}_tables_{names,matches,targets} r,

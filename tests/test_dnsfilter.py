@@ -63,7 +63,7 @@ class DNSFilterTests(unittest.TestCase):
     def test_enable_switch_routes_all_client_dns_to_the_actual_gateway(self):
         values = dict(wireguard_address="10.44.8.1/22", wireguard_port=51820, server_priv_key_final="TEST_ONLY",
                       dns_server="9.9.9.9", ansible_facts={"default_ipv4": {"interface": "eth0"}})
-        for enabled, expected in ((False, ("9.9.9.9", "eth0")), (True, ("10.44.8.1", "eth0", 1053))):
+        for enabled, expected in ((False, ("9.9.9.9", "auto")), (True, ("10.44.8.1", "auto", 1053))):
             config = templates().get_template("wg0.conf.j2").render(**values, dnsfilter_enabled=enabled)
             self.assertEqual(managed_policy(config), expected)
 

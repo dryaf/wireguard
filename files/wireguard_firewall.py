@@ -67,6 +67,24 @@ class WireGuardFirewall:
         self.directory = Path(directory)
         self.run = runner
 
+    def wan_interface(self, wan):
+        """Resolve a local route without sending packets; retain explicit legacy WANs."""
+        if wan != "auto":
+            return wireguard_interface(wan)
+        try:
+            routes = json.loads(self.run(["ip", "-j", "-4", "route", "get", "1.1.1.1"]))
+            if not isinstance(routes, list) or len(routes) != 1 or routes[0].get("type", "unicast") != "unicast":
+                raise ValueError("Expected one usable Internet route")
+            interface = wireguard_interface(routes[0]["dev"])
+            if interface == "lo":
+                raise ValueError("Loopback is not a WAN")
+            return interface
+        except (OperationError, ValueError, KeyError, TypeError, AttributeError) as error:
+            raise OperationError(
+                "Cannot determine the IPv4 WAN interface. Check: ip -4 route get 1.1.1.1. "
+                "Existing firewall rules were retained."
+            ) from error
+
     @contextmanager
     def locked(self):
         # This is deliberately separate from .management.lock: wg-quick invokes
@@ -127,6 +145,7 @@ class WireGuardFirewall:
 
     def check(self):
         """Exercise hook permissions without adding or deleting firewall rules."""
+        self.wan_interface("auto")
         with self.locked():
             for ipv6 in (False, True):
                 self.owned_rules(ipv6=ipv6)
@@ -170,8 +189,10 @@ class WireGuardFirewall:
             return ipv4 or ipv6
 
     def up(self, dns, wan, dns_port=53):
-        dns, wan = wireguard_ipv4(dns), wireguard_interface(wan)
+        dns = wireguard_ipv4(dns)
         dns_port = wireguard_number(dns_port, 1, 65535)
+        # Resolve before touching DNS guards or removing any existing rules.
+        wan = self.wan_interface(wan)
         if dns_port == DNS_PORT:
             self.protect_dns()
         comment = f"-m comment --comment {TAG}"
@@ -205,7 +226,7 @@ if __name__ == "__main__":
     commands = parser.add_subparsers(dest="operation", required=True)
     up = commands.add_parser("up")
     up.add_argument("--dns", required=True)
-    up.add_argument("--wan", required=True)
+    up.add_argument("--wan", required=True, help="auto resolves the current IPv4 Internet route at each invocation")
     up.add_argument("--dns-port", type=int, default=53)
     commands.add_parser("down")
     commands.add_parser("check")

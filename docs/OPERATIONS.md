@@ -106,7 +106,15 @@ configuration file has not changed, and repairs a missing `wg0` interface.
 
 Firewall hooks use rules tagged `wireguard-manager:wg0`. Cleanup removes only those
 rules, including rules left by a failed or killed startup hook. Other firewall rules
-are preserved. When AppArmor is enabled and the distribution supplies `wg-quick` or
+are preserved. New hooks use `--wan auto`: at every startup and rule reconciliation,
+the helper queries the local route to `1.1.1.1` and uses that interface for NAT.
+This lookup sends no packets and requires no DNS. A renamed WAN is therefore
+handled on the next WireGuard start, including after a reboot. Invalid/missing
+routes stop the helper before it changes rules. Existing hooks with explicit
+interface names remain supported. There is no background route watcher; a WAN
+change while WireGuard stays running requires another hook invocation or service restart.
+
+When AppArmor is enabled and the distribution supplies `wg-quick` or
 `usr.bin.wg-quick`, setup adds a confined child profile for the firewall hook through
 the distribution's local customization file. It preserves existing local rules,
 compiles the policy before loading it, and checks the actual helper transition and
@@ -289,6 +297,63 @@ For additional Ansible options, use the same container launcher:
 ```shell
 ./scripts/container playbook server_hardening.yml --check --diff
 ```
+
+## Checking Internet access after an upgrade
+
+With the SSH agent loaded and a VPN client connected and generating traffic, run:
+
+```shell
+make vpn-check
+```
+
+`make vpn-debug` is an alias. Both use the normal inventory, verified SSH host keys
+and sudo access. The checks leave server configuration, firewall rules and services
+unchanged; Ansible transfers and removes a temporary diagnostic script. No server
+private keys, preshared keys or raw WireGuard configuration are printed.
+
+The report continues after failed checks, then returns a nonzero exit status if
+any required check failed. The final error repeats the specific `FAIL` findings;
+if the diagnostic crashes or cannot start, it shows the process output instead.
+The normal SSH `Shared connection ... closed.` message is omitted from that error.
+It includes:
+
+- Running kernel, WireGuard service and boot enablement; module information if `wg0` is missing.
+- Live interface state, address, MTU and listen port compared with `/etc/wireguard/wg0.conf`.
+- Runtime global and per-interface IPv4 forwarding, IPv6 forwarding and reverse path
+  filtering values (see the [kernel sysctl reference](https://docs.kernel.org/networking/ip-sysctl.html)).
+- Forwarding definitions and their file/line locations in sysctl and UFW settings.
+  Disabled definitions produce warnings; the report does not simulate boot-time
+  precedence, masked files or later service overrides.
+- Routing tables/policy and the current WAN interface compared with the managed hook.
+- Firewall backend, forwarding/NAT counters, UFW policy and native nftables rules.
+  Managed forwarding, masquerade and UDP/TCP DNS redirect rules are checked individually.
+- DNS filter service and local health when the managed hook uses port 1053;
+  server resolver lookup and a count of recent client handshakes.
+
+Start with the `FAIL` entries and their `Next` hints. Disabled forwarding, missing
+managed NAT rules and a changed WAN name are reported explicitly. An inactive
+service points to the current boot's WireGuard and kernel/AppArmor journals. Inspect
+these privately: startup errors can include configuration secrets. Apply repairs
+only after reviewing the findings; this command does not attempt automatic recovery.
+
+If the managed hook still names an old WAN interface (for example `eth0` while the
+current route uses `ens3`), a masquerade rule for the old name cannot translate
+traffic leaving the current WAN. The check validates NAT against the current
+Internet route, so the obsolete rule does not count as a pass. Deploy the updated
+helper and `--wan auto` hook once with `DNSFILTER=yes make vpn-server-setup` on
+installations using the DNS filter. It preserves peers and installs the AppArmor
+permissions for route discovery. Later interface renames are resolved at startup;
+they do not require repeating the full setup. This migration runs package updates
+and may briefly restart the VPN. Use the original DNS settings for installations
+without the filter. Then run `make vpn-check` again and test a connected client.
+
+Missing optional tools, idle peers and unsupported/legacy firewall hooks produce
+warnings. For legacy hooks, inspect the displayed rules manually. Rule presence
+does not establish that earlier UFW/nftables rules permit traffic or that return
+packets are accepted. Provider firewalls also need separate review. The DNS health
+and lookup checks run on the server and do not prove client DNS redirection works.
+From a connected client, test a public IPv4 address, a DNS lookup and a website;
+then rerun the check to compare firewall counters and handshakes.
 
 ## Managing VPN Clients
 

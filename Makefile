@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 .PHONY: check-ssh
 .PHONY: dnsfilter-status dnsfilter-logs dnsfilter-monitor dnsfilter-enable-ads dnsfilter-disable-ads dnsfilter-enable-porn dnsfilter-disable-porn dnsfilter-enable-malware dnsfilter-disable-malware
-.PHONY: build init trust-host clean_known_hosts vpn-server-setup vpn-server-status vpn-firewall-setup server-hardening vpn-client-add vpn-client-qrcode vpn-client-remove vpn-client-list vpn-debug vpn-monitor check-auto-upgrades enable-auto-upgrades disable-auto-upgrades test dnsfilter-test integration-test firewall-test syntax-check deps-lock deps-check audit osv-scan help
+.PHONY: build init trust-host clean_known_hosts vpn-server-setup vpn-server-status vpn-firewall-setup server-hardening vpn-client-add vpn-client-qrcode vpn-client-remove vpn-client-list vpn-check vpn-debug vpn-monitor check-auto-upgrades enable-auto-upgrades disable-auto-upgrades test dnsfilter-test integration-test firewall-test syntax-check deps-lock deps-check audit osv-scan help
 
 build: ## Build the pinned controller image
 init: ## Initialize inventory.ini
@@ -16,7 +16,8 @@ vpn-client-add: ## Add or re-export a client
 vpn-client-qrcode: ## Display a client's QR code
 vpn-client-remove: ## Remove a client
 vpn-client-list: ## List clients
-vpn-debug: ## Diagnose IP forwarding, firewall and DNS
+vpn-check: ## Check server forwarding, WireGuard, routes, firewall/NAT and DNS without changes
+vpn-debug: ## Alias for vpn-check
 vpn-monitor: ## Monitor the first server's WireGuard and DNS logs
 dnsfilter-status: ## Show DNS service health, filtering policy and counters
 dnsfilter-logs: ## Show the first server's latest 100 DNS filter log entries
@@ -40,7 +41,7 @@ deps-check: ## Check dependency lock consistency and installed Python packages
 audit: ## Check all locked Python dependencies for known vulnerabilities
 osv-scan: ## Scan Python locks and controller/dev/DNS images with pinned OSV; keep JSON reports
 
-build init trust-host check-ssh clean_known_hosts vpn-server-setup vpn-server-status vpn-firewall-setup server-hardening vpn-client-add vpn-client-qrcode vpn-client-remove vpn-client-list vpn-debug vpn-monitor check-auto-upgrades enable-auto-upgrades disable-auto-upgrades test dnsfilter-test integration-test firewall-test syntax-check deps-lock deps-check audit osv-scan dnsfilter-status dnsfilter-logs dnsfilter-monitor dnsfilter-enable-ads dnsfilter-disable-ads dnsfilter-enable-porn dnsfilter-disable-porn dnsfilter-enable-malware dnsfilter-disable-malware:
+build init trust-host check-ssh clean_known_hosts vpn-server-setup vpn-server-status vpn-firewall-setup server-hardening vpn-client-add vpn-client-qrcode vpn-client-remove vpn-client-list vpn-check vpn-debug vpn-monitor check-auto-upgrades enable-auto-upgrades disable-auto-upgrades test dnsfilter-test integration-test firewall-test syntax-check deps-lock deps-check audit osv-scan dnsfilter-status dnsfilter-logs dnsfilter-monitor dnsfilter-enable-ads dnsfilter-disable-ads dnsfilter-enable-porn dnsfilter-disable-porn dnsfilter-enable-malware dnsfilter-disable-malware:
 	@./scripts/container $@
 
 help: ## Show available commands (no container required)

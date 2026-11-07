@@ -21,6 +21,7 @@ PLAYBOOKS = {
     "vpn-client-remove": "wireguard_client_remove.yml",
     "vpn-client-qrcode": "wireguard_client_qrcode.yml",
     "vpn-client-list": "wireguard_client_list.yml",
+    "vpn-check": "server_debug_vpn.yml",
     "vpn-debug": "server_debug_vpn.yml",
     "server-hardening": "server_hardening.yml",
     "enable-auto-upgrades": "server_toggle_autoupgrades.yml",

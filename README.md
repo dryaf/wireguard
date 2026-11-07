@@ -152,6 +152,8 @@ This configures:
 
 - **UFW firewall:** SSH and WireGuard are allowed; private service ports are protected.
 - **WireGuard:** VPN gateway `10.99.0.1/24`, UDP port `51820`.
+- **WAN detection:** the firewall hook resolves the current Internet interface
+  whenever WireGuard starts, including after a reboot or interface rename.
 - **AppArmor compatibility:** where a distribution WireGuard profile is enabled,
   setup installs and checks a confined firewall hook before starting the VPN.
 - **dnsfilter:** malware blocking through Cloudflare's malware resolver. Adult and
@@ -245,6 +247,7 @@ Run these **on your computer, in the project directory**:
 | Show a QR code again | `CLIENT_NAME=phone make vpn-client-qrcode` |
 | Revoke a device | `CLIENT_NAME=phone make vpn-client-remove` |
 | VPN status | `make vpn-server-status` |
+| Check forwarding, routing, firewall/NAT and DNS after reboot/upgrade | `make vpn-check` |
 | Follow logs; exit with Ctrl+C | `make vpn-monitor` |
 | DNS filter health, settings and counters | `make dnsfilter-status` |
 | Latest 100 DNS filter log entries | `make dnsfilter-logs` |
@@ -253,6 +256,16 @@ Run these **on your computer, in the project directory**:
 | Check automatic updates | `make check-auto-upgrades` |
 | Audit Python dependencies | `make audit` |
 | Scan Python locks and built containers with OSV | `make osv-scan` |
+
+If clients lose Internet access after a kernel upgrade or reboot, run
+`make vpn-check` with a client connected and generating traffic. It checks every
+inventory server without changing configuration or restarting services, prints
+`PASS`/`FAIL`/`WARN` findings and next steps, and exits unsuccessfully if a required
+check fails. `vpn-debug` runs the same checks. See
+[diagnostic details](docs/OPERATIONS.md#checking-internet-access-after-an-upgrade).
+Existing servers need one setup run with the updated project to install automatic
+WAN detection: `DNSFILTER=yes make vpn-server-setup` if using the DNS filter.
+This also runs package updates and may briefly restart the VPN; clients are preserved.
 
 ### Change DNS filtering
 

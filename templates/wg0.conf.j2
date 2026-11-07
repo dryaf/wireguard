@@ -5,7 +5,8 @@ PrivateKey = {{ server_priv_key_final }}
 MTU = {{ wireguard_mtu | default(1280) | wireguard_number(1280, 65535) }}
 
 # Owned rules can be cleaned independently of the interface after a failed start.
-PostUp = /usr/local/lib/wireguard-manager/wireguard_firewall.py up --dns {{ ((wireguard_address | wireguard_gateway) if dnsfilter_enabled | default(false) else dns_server) | wireguard_ipv4 }} --wan {{ ansible_facts.default_ipv4.interface | wireguard_interface }}{{ ' --dns-port 1053' if dnsfilter_enabled | default(false) else '' }}
+# Resolve the WAN from the running routing table on every start, including after reboot.
+PostUp = /usr/local/lib/wireguard-manager/wireguard_firewall.py up --dns {{ ((wireguard_address | wireguard_gateway) if dnsfilter_enabled | default(false) else dns_server) | wireguard_ipv4 }} --wan auto{{ ' --dns-port 1053' if dnsfilter_enabled | default(false) else '' }}
 PostDown = /usr/local/lib/wireguard-manager/wireguard_firewall.py down
 
 {{ wireguard_existing_peers | default('') }}

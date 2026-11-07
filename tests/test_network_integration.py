@@ -28,6 +28,12 @@ def main():
     config = directory / "wg0.conf"
     if config.exists():
         raise SystemExit("Integration tests require a fresh container without an existing wg0.conf")
+    # Give the isolated fixture a local route for automatic WAN discovery. A
+    # dummy link and --network=none cannot reach the host or the Internet.
+    run_command(["ip", "link", "add", "wan0", "type", "dummy"])
+    run_command(["ip", "address", "add", "192.0.2.1/24", "dev", "wan0"])
+    run_command(["ip", "link", "set", "wan0", "up"])
+    run_command(["ip", "-4", "route", "add", "default", "dev", "wan0"])
     from test_native_firewall import run_tests
     from test_apparmor_policy import check_profile_syntax
     check_profile_syntax()
@@ -39,12 +45,6 @@ def main():
         run_command(["wg", "show", "interfaces"])
     except OperationError as error:
         raise SystemExit("Native WireGuard is blocked in this test environment. Inspect host AppArmor/netlink permissions; use a compatible disposable Linux test host. No host policy was changed.") from error
-    try:
-        run_command(["ip", "link", "show", "wan0"])
-    except OperationError:
-        run_command(["ip", "link", "add", "wan0", "type", "dummy"])
-        run_command(["ip", "address", "add", "192.0.2.1/24", "dev", "wan0"])
-        run_command(["ip", "link", "set", "wan0", "up"])
     private = run_command(["wg", "genkey"]).strip()
     atomic_write(directory / "privatekey", private)
     values = dict(wireguard_address="10.99.0.1/24", wireguard_port=51820, wireguard_mtu=1280,

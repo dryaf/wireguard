@@ -247,7 +247,7 @@ class ContainerLauncherTests(unittest.TestCase):
             agent_path = str(self.root / 'agent')
             agent.bind(agent_path)
             self.environment.update(SSH_AUTH_SOCK=agent_path, CLIENT_NAME='unrelated', DNSFILTER='no')
-            commands = ('dnsfilter-status', 'dnsfilter-logs', 'dnsfilter-monitor', *container_cli.DNSFILTER_CHANGES)
+            commands = ('vpn-check', 'vpn-debug', 'dnsfilter-status', 'dnsfilter-logs', 'dnsfilter-monitor', *container_cli.DNSFILTER_CHANGES)
             for command in commands:
                 with self.subTest(command=command):
                     args = json.loads(self.invoke(command).stdout)
@@ -300,6 +300,12 @@ class ContainerLauncherTests(unittest.TestCase):
 
 
 class ContainerCommandTests(unittest.TestCase):
+    def test_vpn_check_and_debug_dispatch_to_the_same_read_only_playbook(self):
+        for command in ("vpn-check", "vpn-debug"):
+            with self.subTest(command=command), patch.object(container_cli, "run") as execute:
+                container_cli.main(command, [])
+                execute.assert_called_once_with("ansible-playbook", "-i", container_cli.INVENTORY, "server_debug_vpn.yml")
+
     def test_ansible_runs_filters_templates_and_local_delegation_as_non_root(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

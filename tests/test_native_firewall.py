@@ -42,6 +42,8 @@ sys.exit(result.returncode)
             def __call__(self, argv, stdin=None):
                 if argv[0] in ("iptables-save", "iptables-restore"):
                     return run_command(argv, stdin)
+                if argv == ["ip", "-j", "-4", "route", "get", "1.1.1.1"]:
+                    return run_command(argv, stdin)
                 if argv == ["systemctl", "stop", "wg-quick@wg0"] and self.active:
                     firewall.down()
                 result = super().__call__(argv, stdin)
@@ -97,6 +99,25 @@ sys.exit(result.returncode)
             assert "2.2.2.2:53" not in run_command(["iptables-save", "-t", "nat"])
             assert "unrelated-release-rule" in run_command(["iptables-save", "-t", "filter"])
             print(f"PASS: real Netfilter rollback after hook {mode} (simulated service lifecycle)")
+        assert firewall.up("1.1.1.1", "auto") is False
+        try:
+            run_command(["ip", "link", "set", "wan0", "down"])
+            run_command(["ip", "link", "set", "wan0", "name", "wan-renamed"])
+            run_command(["ip", "link", "set", "wan-renamed", "up"])
+            run_command(["ip", "-4", "route", "replace", "default", "dev", "wan-renamed"])
+            assert firewall.up("1.1.1.1", "auto") is True
+            nat = firewall.owned_rules()["nat"]
+            assert any("-o wan-renamed " in line for line in nat)
+            assert not any("-o wan0 " in line for line in nat)
+            assert firewall.up("1.1.1.1", "auto") is False
+            assert "unrelated-release-rule" in run_command(["iptables-save", "-t", "filter"])
+        finally:
+            run_command(["ip", "link", "set", "wan-renamed", "down"])
+            run_command(["ip", "link", "set", "wan-renamed", "name", "wan0"])
+            run_command(["ip", "link", "set", "wan0", "up"])
+            run_command(["ip", "-4", "route", "replace", "default", "dev", "wan0"])
+        assert firewall.up("1.1.1.1", "auto") is True
+        print("PASS: real Netfilter follows an interface rename without changing the saved auto hook")
         assert firewall.down() is True
         assert firewall.down() is False
         assert "unrelated-release-rule" in run_command(["iptables-save", "-t", "filter"])

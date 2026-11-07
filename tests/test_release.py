@@ -90,10 +90,15 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("Endpoint = 192.0.2.1:51820", fallback)
         variables = dict(wireguard_address="10.99.0.1/24", wireguard_port=51820, server_priv_key_final="TEST_ONLY",
                          ansible_facts={"default_ipv4": {"interface": "eth0"}}, dns_server="1.1.1.1")
-        for key, value in (("dns_server", "1.1.1.1;id"), ("ansible_facts", {"default_ipv4": {"interface": "eth0;id"}}),
-                           ("ansible_facts", {"default_ipv4": {"interface": "--help"}})):
-            with self.subTest(key=key), self.assertRaises(ValueError):
-                environment.get_template("wg0.conf.j2").render(**dict(variables, **{key: value}))
+        with self.assertRaises(ValueError):
+            environment.get_template("wg0.conf.j2").render(**dict(variables, dns_server="1.1.1.1;id"))
+        # Interface facts are no longer interpolated into a root shell hook.
+        for interface in ("eth0", "ens3", "eth0;id", "--help"):
+            with self.subTest(interface=interface):
+                config = environment.get_template("wg0.conf.j2").render(**dict(
+                    variables, ansible_facts={"default_ipv4": {"interface": interface}}))
+                self.assertEqual(config, environment.get_template("wg0.conf.j2").render(**variables))
+                self.assertIn("--wan auto", config)
 
 
 if __name__ == "__main__":
